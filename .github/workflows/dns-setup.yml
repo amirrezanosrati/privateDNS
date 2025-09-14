@@ -1,4 +1,4 @@
-name: Mobile Legends DNS Server
+name: Mobile Legends DNS with Numerical IP
 on:
   workflow_dispatch:
 
@@ -6,14 +6,13 @@ jobs:
   dns-server:
     runs-on: ubuntu-latest
     steps:
-    - name: Install required packages
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y dnsmasq dnsutils
 
-    - name: Setup dnsmasq configuration
+    - name: Setup dnsmasq
       run: |
-        # ایجاد پیکربندی ساده با آدرس‌های معتبر
         sudo tee /etc/dnsmasq.conf > /dev/null << EOF
         port=5353
         listen-address=127.0.0.1
@@ -21,79 +20,61 @@ jobs:
         server=1.1.1.1
         address=/mlbb.com/104.16.121.233
         address=/mobilelegends.com/104.18.122.45
-        # حذف آدرس نامعتبر moonton.com
         no-hosts
         no-resolv
         EOF
 
-    - name: Run dnsmasq manually
+    - name: Start dnsmasq
       run: |
-        # توقف سرویس‌های قبلی
         sudo pkill dnsmasq || true
         sleep 2
-        
-        # اجرای dnsmasq روی پورت 5353
         sudo dnsmasq --port=5353 --no-daemon &
         sleep 3
-        
-        # تست DNS با dig
-        echo "Testing DNS server..."
-        dig @127.0.0.1 -p 5353 mlbb.com +short && echo "✅ DNS server is working"
 
-    - name: Download Ngrok
+    - name: Get Numerical IP from Ngrok
       run: |
         # دانلود ngrok
-        curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o ngrok.tgz
-        tar -xzf ngrok.tgz
+        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar -xzf ngrok-v3-stable-linux-amd64.tgz
         chmod +x ngrok
-
-    - name: Setup Ngrok authentication
-      run: |
+        
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        echo "✅ Ngrok authenticated"
-
-    - name: Start Ngrok tunnel
-      run: |
-        # راه‌اندازی تونل
+        
+        # راه اندازی تونل
         ./ngrok tcp 5353 --log=stdout > ngrok.log 2>&1 &
         sleep 20
         
-        # دریافت آدرس تونل
-        TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o "tcp://[^\"]*" | head -1 || echo "")
-        if [ -n "$TUNNEL_URL" ]; then
-            echo "🌐 Tunnel URL: $TUNNEL_URL"
-            DNS_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
-            DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
+        # دریافت IP عددی از دامنه ngrok
+        NGROK_DOMAIN=$(curl -s http://localhost:4040/api/tunnels | grep -o 'tcp://[^"]*' | head -1 | cut -d':' -f2 | sed 's#//##')
+        
+        if [ -n "$NGROK_DOMAIN" ]; then
+            # تبدیل دامنه به IP عددی
+            NUMERICAL_IP=$(dig +short $NGROK_DOMAIN | head -1)
+            echo "🌐 Numerical IP: $NUMERICAL_IP"
+            echo "NUMERICAL_IP=$NUMERICAL_IP" >> $GITHUB_ENV
         else
-            # استفاده از آدرس پیش‌فرض
-            DNS_IP="0.tcp.ngrok.io"
-            DNS_PORT="5353"
-            echo "⚠️ Using default ngrok address"
+            # Fallback به IP های عمومی
+            echo "🌐 Using Cloudflare DNS as fallback"
+            echo "NUMERICAL_IP=1.1.1.1" >> $GITHUB_ENV
         fi
-        
-        echo "DNS_IP=$DNS_IP" >> $GITHUB_ENV
-        echo "DNS_PORT=$DNS_PORT" >> $GITHUB_ENV
 
-    - name: Display connection information
+    - name: Display Numerical DNS Info
       run: |
         echo "========================================"
-        echo "🎯 MOBILE LEGENDS DNS SERVER READY!"
+        echo "🎯 NUMERICAL DNS SERVER READY!"
         echo "========================================"
-        echo "📱 DNS IP: ${{ env.DNS_IP }}"
-        echo "🔌 DNS Port: ${{ env.DNS_PORT }}"
+        echo "📱 DNS IP: ${{ env.NUMERICAL_IP }}"
+        echo "🔌 DNS Port: 5353"
         echo ""
-        echo "💡 در DNS Changer گوشی وارد کنید:"
-        echo "Address: ${{ env.DNS_IP }}"
-        echo "Port: ${{ env.DNS_PORT }}"
+        echo "💡 در گوشی وارد کنید:"
+        echo "Primary DNS: ${{ env.NUMERICAL_IP }}"
+        echo "Port: 5353"
         echo "========================================"
 
-    - name: Keep workflow running
+    - name: Keep alive
       run: |
-        echo "🟢 Server is running..."
-        echo "⏰ Press 'Cancel workflow' to stop"
-        
-        # حلقه بی‌نهایت ساده
+        echo "🟢 Numerical DNS Server is running..."
         while true; do
-            echo "✅ Still running at $(date +'%H:%M:%S')"
+            echo "✅ IP: ${{ env.NUMERICAL_IP }} - Active at $(date +'%H:%M:%S')"
             sleep 60
         done
