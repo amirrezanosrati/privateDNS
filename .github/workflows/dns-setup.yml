@@ -6,98 +6,145 @@ jobs:
   dns-server:
     runs-on: ubuntu-latest
     steps:
-    - name: Install required packages
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Python and required packages
       run: |
         sudo apt-get update
-        sudo apt-get install -y dnsmasq
+        sudo apt-get install -y python3 python3-pip
+        pip3 install dnspython
 
-    - name: Setup dnsmasq configuration
+    - name: Create Python DNS Server
       run: |
-        # ایجاد پیکربندی ساده
-        sudo tee /etc/dnsmasq.conf > /dev/null << EOF
-        port=5353
-        listen-address=127.0.0.1
-        server=8.8.8.8
-        server=1.1.1.1
-        address=/mlbb.com/104.16.121.233
-        address=/mobilelegends.com/104.18.122.45
-        no-hosts
-        no-resolv
-        EOF
+        cat > dns_server.py << 'EOF'
+#!/usr/bin/env python3
+import socketserver
+import dns.resolver
+import dns.message
+import dns.rdataclass
+import dns.rdatatype
 
-    - name: Run dnsmasq manually
-      run: |
-        # توقف سرویس‌های قبلی
-        sudo pkill dnsmasq || true
-        sleep 2
+# DNS mapping for Mobile Legends and games
+DNS_MAPPING = {
+    'mlbb.com': '104.16.121.233',
+    'mobilelegends.com': '104.18.122.45', 
+    'moonton.com': '104.18.123.456',
+    'steam.com': '104.112.119.210',
+    'epicgames.com': '104.16.109.18'
+}
+
+class DNSHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        data = self.request[0]
+        socket = self.request[1]
         
-        # اجرای dnsmasq روی پورت 5353
-        sudo dnsmasq --port=5353 --no-daemon &
-        sleep 3
+        try:
+            request = dns.message.from_wire(data)
+            query_name = str(request.question[0].name).lower()
+            
+            response = dns.message.make_response(request)
+            
+            if query_name in DNS_MAPPING:
+                ip = DNS_MAPPING[query_name]
+                rrset = dns.rrset.from_text(
+                    request.question[0].name,
+                    300,
+                    dns.rdataclass.IN,
+                    dns.rdatatype.A,
+                    ip
+                )
+                response.answer.append(rrset)
+            else:
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+                answer = resolver.resolve(query_name, 'A')
+                for rdata in answer:
+                    rrset = dns.rrset.from_text(
+                        request.question[0].name,
+                        300,
+                        dns.rdataclass.IN, 
+                        dns.rdatatype.A,
+                        str(rdata)
+                    )
+                    response.answer.append(rrset)
+            
+            socket.sendto(response.to_wire(), self.client_address)
+            print(f"DNS Query: {query_name}")
+            
+        except Exception as e:
+            print(f"Error: {e}")
+
+if __name__ == "__main__":
+    print("Starting Python DNS Server on port 5353...")
+    server = socketserver.UDPServer(('0.0.0.0', 5353), DNSHandler)
+    server.serve_forever()
+EOF
+
+        chmod +x dns_server.py
+
+    - name: Start Python DNS Server
+      run: |
+        nohup python3 dns_server.py > dns.log 2>&1 &
+        echo $! > dns.pid
+        sleep 5
         
         # تست DNS
+        echo "Testing DNS server..."
         nslookup mlbb.com 127.0.0.1 -port=5353
-        echo "✅ DNS server is working"
 
-    - name: Download Ngrok
+    - name: Download and setup Ngrok
       run: |
-        # دانلود ngrok
-        curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o ngrok.tgz
-        tar -xzf ngrok.tgz
+        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar -xzf ngrok-v3-stable-linux-amd64.tgz
         chmod +x ngrok
-        ./ngrok version
-
-    - name: Setup Ngrok authentication
-      run: |
+        
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        echo "✅ Ngrok authenticated"
-
-    - name: Start Ngrok tunnel
-      run: |
-        # راه‌اندازی تونل
+        
         ./ngrok tcp 5353 --log=stdout > ngrok.log 2>&1 &
-        sleep 20
+        echo $! > ngrok.pid
+        sleep 25
+
+    - name: Get connection information
+      run: |
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "{}")
+        TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o 'tcp://[^"]*' | head -1 || echo "")
         
-        # نمایش اطلاعات تونل
-        echo "🔍 Ngrok log contents:"
-        cat ngrok.log || echo "No log file yet"
-        
-        # دریافت آدرس تونل
-        TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o "tcp://[^\"]*" | head -1 || echo "")
         if [ -n "$TUNNEL_URL" ]; then
-            echo "🌐 Tunnel URL: $TUNNEL_URL"
             DNS_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
             DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
         else
-            # استفاده از آدرس پیش‌فرض
             DNS_IP="0.tcp.ngrok.io"
             DNS_PORT="5353"
-            echo "⚠️ Using default ngrok address"
         fi
         
         echo "DNS_IP=$DNS_IP" >> $GITHUB_ENV
         echo "DNS_PORT=$DNS_PORT" >> $GITHUB_ENV
 
-    - name: Display connection information
+    - name: Display connection info
       run: |
-        echo "========================================"
-        echo "🎯 MOBILE LEGENDS DNS SERVER READY!"
-        echo "========================================"
-        echo "📱 DNS IP: ${{ env.DNS_IP }}"
-        echo "🔌 DNS Port: ${{ env.DNS_PORT }}"
+        echo "=========================================="
+        echo "MOBILE LEGENDS DNS SERVER READY!"
+        echo "=========================================="
+        echo "DNS IP: ${{ env.DNS_IP }}"
+        echo "DNS Port: ${{ env.DNS_PORT }}"
         echo ""
-        echo "💡 در DNS Changer گوشی وارد کنید:"
-        echo "Address: ${{ env.DNS_IP }}"
-        echo "Port: ${{ env.DNS_PORT }}"
-        echo "========================================"
+        echo "Test: nslookup mlbb.com ${{ env.DNS_IP }} -port=${{ env.DNS_PORT }}"
+        echo "=========================================="
 
-    - name: Keep workflow running
+    - name: Keep alive
       run: |
-        echo "🟢 Server is running..."
-        echo "⏰ Press 'Cancel workflow' to stop"
+        echo "DNS Server is running..."
+        echo "Press Ctrl+C to stop"
         
-        # حلقه بی‌نهایت ساده
         while true; do
-            echo "✅ Still running at $(date +'%H:%M:%S')"
-            sleep 60
+            if [ -f "dns.pid" ] && ps -p $(cat dns.pid) >/dev/null 2>&1; then
+                echo "DNS: Active - $(date +'%H:%M:%S')"
+            fi
+            
+            if [ -f "ngrok.pid" ] && ps -p $(cat ngrok.pid) >/dev/null 2>&1; then
+                echo "Ngrok: Active - $(date +'%H:%M:%S')"
+            fi
+            
+            sleep 30
         done
