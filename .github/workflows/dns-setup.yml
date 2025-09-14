@@ -6,6 +6,9 @@ jobs:
   dns-server:
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
     - name: Install Python and required packages
       run: |
         sudo apt-get update
@@ -28,9 +31,7 @@ DNS_MAPPING = {
     'mobilelegends.com': '104.18.122.45', 
     'moonton.com': '104.18.123.456',
     'steam.com': '104.112.119.210',
-    'epicgames.com': '104.16.109.18',
-    'origin.com': '104.112.119.210',
-    'battle.net': '104.16.109.18'
+    'epicgames.com': '104.16.109.18'
 }
 
 class DNSHandler(socketserver.BaseRequestHandler):
@@ -45,18 +46,16 @@ class DNSHandler(socketserver.BaseRequestHandler):
             response = dns.message.make_response(request)
             
             if query_name in DNS_MAPPING:
-                # پاسخ با IP از mapping
                 ip = DNS_MAPPING[query_name]
                 rrset = dns.rrset.from_text(
                     request.question[0].name,
-                    300,  # TTL
+                    300,
                     dns.rdataclass.IN,
                     dns.rdatatype.A,
                     ip
                 )
                 response.answer.append(rrset)
             else:
-                # فوروارد به DNS عمومی
                 resolver = dns.resolver.Resolver()
                 resolver.nameservers = ['8.8.8.8', '1.1.1.1']
                 answer = resolver.resolve(query_name, 'A')
@@ -71,52 +70,43 @@ class DNSHandler(socketserver.BaseRequestHandler):
                     response.answer.append(rrset)
             
             socket.sendto(response.to_wire(), self.client_address)
-            print(f"✅ DNS Query: {query_name}")
+            print(f"DNS Query: {query_name}")
             
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
-    print("🚀 Starting Python DNS Server on port 5353...")
-    print("📱 Mobile Legends DNS Ready!")
+    print("Starting Python DNS Server on port 5353...")
     server = socketserver.UDPServer(('0.0.0.0', 5353), DNSHandler)
     server.serve_forever()
 EOF
 
         chmod +x dns_server.py
-        echo "✅ Python DNS Server created"
 
     - name: Start Python DNS Server
       run: |
-        # اجرای DNS سرور در پس‌زمینه
         nohup python3 dns_server.py > dns.log 2>&1 &
         echo $! > dns.pid
         sleep 5
         
-        # تست DNS سرور
+        # تست DNS
         echo "Testing DNS server..."
-        nslookup mlbb.com 127.0.0.1 -port=5353 && echo "✅ Mobile Legends DNS working!"
-        nslookup google.com 127.0.0.1 -port=5353 && echo "✅ General DNS working!"
+        nslookup mlbb.com 127.0.0.1 -port=5353
 
     - name: Download and setup Ngrok
       run: |
-        # دانلود ngrok
         wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
         tar -xzf ngrok-v3-stable-linux-amd64.tgz
         chmod +x ngrok
         
-        # تنظیم auth token
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
         
-        # راه اندازی تونل برای پورت 5353
         ./ngrok tcp 5353 --log=stdout > ngrok.log 2>&1 &
         echo $! > ngrok.pid
-        echo "🔄 Starting ngrok tunnel..."
         sleep 25
 
     - name: Get connection information
       run: |
-        # دریافت اطلاعات تونل
         TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "{}")
         TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o 'tcp://[^"]*' | head -1 || echo "")
         
@@ -125,7 +115,7 @@ EOF
             DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
         else
             DNS_IP="0.tcp.ngrok.io"
-            DNS_PORT=$(grep -o "url=tcp://[^ ]*" ngrok.log | head -1 | cut -d':' -f3 | cut -d' ' -f1 || echo "5353")
+            DNS_PORT="5353"
         fi
         
         echo "DNS_IP=$DNS_IP" >> $GITHUB_ENV
@@ -134,43 +124,27 @@ EOF
     - name: Display connection info
       run: |
         echo "=========================================="
-        echo "🎯 MOBILE LEGENDS DNS SERVER READY!"
+        echo "MOBILE LEGENDS DNS SERVER READY!"
         echo "=========================================="
-        echo "📱 برای DNS Changer گوشی:"
-        echo "Primary DNS: ${{ env.DNS_IP }}"
-        echo "Port: ${{ env.DNS_PORT }}"
+        echo "DNS IP: ${{ env.DNS_IP }}"
+        echo "DNS Port: ${{ env.DNS_PORT }}"
         echo ""
-        echo "🔧 تست اتصال:"
-        echo "nslookup mlbb.com ${{ env.DNS_IP }} -port=${{ env.DNS_PORT }}"
-        echo ""
-        echo "✨ مخصوص بازی Mobile Legends"
+        echo "Test: nslookup mlbb.com ${{ env.DNS_IP }} -port=${{ env.DNS_PORT }}"
         echo "=========================================="
 
     - name: Keep alive
       run: |
-        echo "🟢 DNS Server is running..."
-        echo "💡 برای قطع کردن: Cancel workflow را بزنید"
-        echo ""
+        echo "DNS Server is running..."
+        echo "Press Ctrl+C to stop"
         
-        # اجرای بی‌نهایت برای نگه‌داری workflow
         while true; do
-            # بررسی وضعیت سرویس‌ها
             if [ -f "dns.pid" ] && ps -p $(cat dns.pid) >/dev/null 2>&1; then
-                echo "✅ Python DNS: Active - $(date +'%H:%M:%S')"
-            else
-                echo "🔄 Restarting DNS server..."
-                nohup python3 dns_server.py > dns.log 2>&1 &
-                echo $! > dns.pid
+                echo "DNS: Active - $(date +'%H:%M:%S')"
             fi
             
             if [ -f "ngrok.pid" ] && ps -p $(cat ngrok.pid) >/dev/null 2>&1; then
-                echo "✅ Ngrok Tunnel: Active - $(date +'%H:%M:%S')"
-            else
-                echo "🔄 Restarting Ngrok..."
-                ./ngrok tcp 5353 --log=stdout > ngrok.log 2>&1 &
-                echo $! > ngrok.pid
+                echo "Ngrok: Active - $(date +'%H:%M:%S')"
             fi
             
-            # تست اتصال هر 30 ثانیه
             sleep 30
         done
