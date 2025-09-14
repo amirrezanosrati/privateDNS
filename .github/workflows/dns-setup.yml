@@ -6,23 +6,15 @@ jobs:
   dns-server:
     runs-on: ubuntu-latest
     steps:
-    - name: Install dependencies
+    - name: Install Docker and dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y dnsmasq curl
+        sudo apt-get install -y docker.io curl
 
-    - name: Setup DNS Server
+    - name: Create dnsmasq configuration
       run: |
-        # توقف سرویس‌های conflicting
-        sudo systemctl stop systemd-resolved || true
-        sudo systemctl disable systemd-resolved || true
-        
-        # آزاد کردن پورت 53
-        sudo fuser -k 53/udp || true
-        sudo fuser -k 53/tcp || true
-
-        # ایجاد پیکربندی dnsmasq
-        sudo tee /etc/dnsmasq.conf > /dev/null << EOF
+        # ایجاد فایل پیکربندی dnsmasq
+        cat > dnsmasq.conf << EOF
         interface=*
         listen-address=0.0.0.0
         bind-interfaces
@@ -30,20 +22,43 @@ jobs:
         server=1.1.1.1
         address=/steam.com/104.112.119.210
         address=/epicgames.com/104.16.109.18
+        address=/origin.com/104.112.119.210
+        address=/battle.net/104.16.109.18
         no-hosts
         no-resolv
         cache-size=1000
         EOF
 
-        # راه اندازی dnsmasq
-        sudo systemctl restart dnsmasq
-        sleep 3
+    - name: Run dnsmasq in Docker
+      run: |
+        # توقف containerهای قبلی
+        sudo docker rm -f dns-server 2>/dev/null || true
         
-        # تست DNS
-        echo "Testing DNS server..."
-        nslookup steam.com 127.0.0.1 && echo "✅ DNS is working!"
+        # اجرای dnsmasq در Docker
+        sudo docker run -d \
+          --name dns-server \
+          --restart unless-stopped \
+          -p 53:53/udp \
+          -p 53:53/tcp \
+          -v $(pwd)/dnsmasq.conf:/etc/dnsmasq.conf \
+          --cap-add=NET_ADMIN \
+          ubuntu/dnsmasq:latest \
+          -d -q \
+          --log-facility=- \
+          --conf-file=/etc/dnsmasq.conf
 
-    - name: Setup Ngrok (Simple Method)
+        sleep 5
+        echo "✅ DNS server is running in Docker"
+
+    - name: Test DNS server
+      run: |
+        # تست DNS سرور
+        echo "Testing DNS server..."
+        nslookup steam.com 127.0.0.1 && echo "✅ Steam DNS working!"
+        nslookup epicgames.com 127.0.0.1 && echo "✅ Epic Games DNS working!"
+        nslookup google.com 127.0.0.1 && echo "✅ General DNS working!"
+
+    - name: Download and setup Ngrok
       run: |
         # دانلود ngrok
         wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
@@ -53,65 +68,36 @@ jobs:
         # تنظیم auth token
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
         
-        # راه اندازی تونل در پس‌زمینه
+        # راه اندازی تونل برای پورت 53
         ./ngrok tcp 53 --log=stdout > ngrok.log 2>&1 &
-        NGORK_PID=$!
-        echo $NGORK_PID > ngrok.pid
-        
-        # منتظر ماندن برای راه اندازی تونل
-        echo "Waiting for ngrok to start..."
+        echo "🔄 Starting ngrok tunnel..."
         sleep 20
-        
-        # بررسی وضعیت ngrok
-        if ps -p $NGORK_PID > /dev/null; then
-            echo "✅ Ngrok is running successfully!"
-        else
-            echo "❌ Ngrok failed to start"
-            cat ngrok.log
-            exit 1
-        fi
 
-    - name: Get Connection Info
+    - name: Get connection information
       run: |
-        # دریافت اطلاعات تونل به صورت مستقیم
+        # دریافت اطلاعات تونل
         echo "Getting tunnel information..."
-        sleep 10
         
-        # روش ساده برای دریافت آدرس
-        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "")
+        # روش اول: استفاده از API
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "{}")
+        TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o 'tcp://[^"]*' | head -n 1 || echo "")
         
-        if [ -n "$TUNNEL_INFO" ]; then
-            # استفاده از روش ساده برای استخراج
-            TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o 'tcp://[^"]*' | head -1)
-            if [ -n "$TUNNEL_URL" ]; then
-                DNS_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
-                DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
-                echo "🌐 TUNNEL_URL: $TUNNEL_URL"
-                echo "🔢 DNS_IP: $DNS_IP"
-                echo "🔌 DNS_PORT: $DNS_PORT"
-                echo "DNS_IP=$DNS_IP" >> $GITHUB_ENV
-                echo "DNS_PORT=$DNS_PORT" >> $GITHUB_ENV
-            else
-                # روش جایگزین: استفاده از log file
-                echo "Trying alternative method from log file..."
-                LOG_IP=$(grep -o 'url=[^ ]*' ngrok.log | grep -o 'tcp://[^ ]*' | head -1 | cut -d':' -f2 | sed 's#//##')
-                if [ -n "$LOG_IP" ]; then
-                    echo "🌐 Found IP from log: $LOG_IP"
-                    echo "DNS_IP=$LOG_IP" >> $GITHUB_ENV
-                    echo "DNS_PORT=53" >> $GITHUB_ENV
-                else
-                    echo "⚠️ Using default ngrok domain"
-                    echo "DNS_IP=0.tcp.ngrok.io" >> $GITHUB_ENV
-                    echo "DNS_PORT=53" >> $GITHUB_ENV
-                fi
-            fi
+        if [ -n "$TUNNEL_URL" ]; then
+            DNS_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
+            DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
         else
-            echo "⚠️ Using fallback ngrok address"
-            echo "DNS_IP=0.tcp.ngrok.io" >> $GITHUB_ENV
-            echo "DNS_PORT=53" >> $GITHUB_ENV
+            # روش دوم: استفاده از log file
+            echo "Using alternative method to get tunnel info..."
+            DNS_IP=$(grep -o "url=tcp://[^ ]*" ngrok.log | head -1 | cut -d':' -f2 | sed 's#//##' || echo "0.tcp.ngrok.io")
+            DNS_PORT=$(grep -o "url=tcp://[^ ]*" ngrok.log | head -1 | cut -d':' -f3 | cut -d' ' -f1 || echo "53")
         fi
+        
+        echo "🌐 DNS_IP=$DNS_IP"
+        echo "🔌 DNS_PORT=$DNS_PORT"
+        echo "DNS_IP=$DNS_IP" >> $GITHUB_ENV
+        echo "DNS_PORT=$DNS_PORT" >> $GITHUB_ENV
 
-    - name: Display Final Info
+    - name: Display connection info
       run: |
         echo "=========================================="
         echo "🎯 YOUR PERSONAL DNS SERVER IS READY!"
@@ -127,10 +113,10 @@ jobs:
         echo "nslookup steam.com ${{ env.DNS_IP }}"
         echo "=========================================="
 
-    - name: Keep alive with health checks
+    - name: Keep alive and monitor
       run: |
         echo "🟢 DNS Server is running..."
-        echo "💡 Press the 'Cancel workflow' button to stop"
+        echo "💡 Press the 'Cancel workflow' button in GitHub to stop"
         echo ""
         
         COUNTER=0
@@ -138,18 +124,23 @@ jobs:
             COUNTER=$((COUNTER + 1))
             echo "⏰ Running for $((COUNTER * 30)) seconds..."
             
-            # تست سلامت
+            # تست سلامت DNS
             if nslookup steam.com 127.0.0.1 >/dev/null 2>&1; then
-                echo "✅ DNS: Healthy"
+                echo "✅ DNS Server: Healthy"
             else
-                echo "❌ DNS: Not responding"
+                echo "❌ DNS Server: Not responding - restarting..."
+                sudo docker restart dns-server
+                sleep 5
             fi
             
-            # بررسی ngrok
-            if [ -f "ngrok.pid" ] && ps -p $(cat ngrok.pid) >/dev/null; then
-                echo "✅ Ngrok: Running"
+            # تست سلامت Ngrok
+            if curl -s http://localhost:4040 >/dev/null 2>&1; then
+                echo "✅ Ngrok Tunnel: Active"
             else
-                echo "❌ Ngrok: Stopped"
+                echo "❌ Ngrok Tunnel: Down - restarting..."
+                pkill ngrok || true
+                ./ngrok tcp 53 --log=stdout > ngrok.log 2>&1 &
+                sleep 15
             fi
             
             sleep 30
