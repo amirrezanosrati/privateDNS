@@ -1,0 +1,63 @@
+name: Private DNS Server Setup
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'  # روزانه اجرا شود
+
+jobs:
+  setup-dns:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Install dnsmasq
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dnsmasq
+
+    - name: Configure private DNS
+      run: |
+        # ایجاد پیکربندی DNS شخصی
+        echo "listen-address=0.0.0.0" | sudo tee /etc/dnsmasq.conf
+        echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.conf
+        echo "server=1.1.1.1" | sudo tee -a /etc/dnsmasq.conf
+        echo "address=/steam.com/104.112.119.210" | sudo tee -a /etc/dnsmasq.conf
+        echo "address=/epicgames.com/104.16.109.18" | sudo tee -a /etc/dnsmasq.conf
+        
+        sudo systemctl restart dnsmasq
+        echo "✅ DNS Server configured successfully!"
+
+    - name: Download and setup Ngrok
+      run: |
+        wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar -xzf ngrok-v3-stable-linux-amd64.tgz
+        chmod +x ngrok
+        
+        # تنظیم توکن Ngrok
+        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        
+    - name: Start DNS tunnel
+      run: |
+        # راه‌اندازی تونل برای DNS
+        ./ngrok tcp 53 --log=stdout > ngrok.log &
+        sleep 10  # منتظر بمان تا تونل راه بیاید
+        
+        # دریافت آدرس تونل
+        TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+        echo "🛡️ DNS Tunnel Established!"
+        echo "📍 Tunnel URL: $TUNNEL_URL"
+        
+        # نمایش اطلاعات برای کاربر
+        echo "=========================================="
+        echo "✅ DNS SERVER IS READY!"
+        echo "=========================================="
+        echo "DNS Address: $(echo $TUNNEL_URL | cut -d':' -f2 | sed 's#//##')"
+        echo "Port: $(echo $TUNNEL_URL | cut -d':' -f3)"
+        echo "=========================================="
+        
+        # نگه‌داری اجرا
+        while true; do
+            echo "🟢 DNS Server is running... (Ctrl+C to stop)"
+            sleep 300
+        done
