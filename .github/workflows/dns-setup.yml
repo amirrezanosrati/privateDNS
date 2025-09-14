@@ -6,14 +6,16 @@ jobs:
   dns-server:
     runs-on: ubuntu-latest
     steps:
-    - name: Setup DNS Server
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y dnsmasq
+        sudo apt-get install -y dnsmasq curl
 
+    - name: Setup DNS Server
+      run: |
         # توقف سرویس پیش فرض
-        sudo systemctl stop systemd-resolved
-        sudo systemctl disable systemd-resolved
+        sudo systemctl stop systemd-resolved || true
+        sudo systemctl disable systemd-resolved || true
 
         # ایجاد پیکربندی جدید
         sudo tee /etc/dnsmasq.conf > /dev/null << EOF
@@ -58,13 +60,14 @@ jobs:
         ./ngrok tcp 53 --log=stdout > ngrok.log &
         sleep 15
         
-        # دریافت اطلاعات تونل
+        # دریافت اطلاعات تونل بدون jq
         TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "")
         if [ -n "$TUNNEL_INFO" ]; then
-            TUNNEL_URL=$(echo $TUNNEL_INFO | jq -r '.tunnels[0].public_url' 2>/dev/null || echo "")
+            # استفاده از grep و sed برای استخراج اطلاعات
+            TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o '"public_url":"[^"]*' | cut -d'"' -f4 | head -1)
             if [ -n "$TUNNEL_URL" ]; then
-                DNS_IP=$(echo $TUNNEL_URL | cut -d':' -f2 | sed 's#//##')
-                DNS_PORT=$(echo $TUNNEL_URL | cut -d':' -f3)
+                DNS_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
+                DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
                 echo "🌐 DNS Tunnel Established!"
                 echo "🔢 IP Address: $DNS_IP"
                 echo "🔌 Port: $DNS_PORT"
@@ -72,10 +75,25 @@ jobs:
                 echo "DNS_PORT=$DNS_PORT" >> $GITHUB_ENV
             else
                 echo "⚠️ Could not parse tunnel information"
-                echo "Tunnel info: $TUNNEL_INFO"
+                echo "Trying alternative method..."
+                
+                # روش جایگزین برای استخراج اطلاعات
+                ALTERNATIVE_IP=$(curl -s http://localhost:4040/api/tunnels | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+                if [ -n "$ALTERNATIVE_IP" ]; then
+                    echo "🌐 Found IP: $ALTERNATIVE_IP"
+                    echo "🔌 Default Port: 53"
+                    echo "DNS_IP=$ALTERNATIVE_IP" >> $GITHUB_ENV
+                    echo "DNS_PORT=53" >> $GITHUB_ENV
+                else
+                    echo "❌ Failed to get tunnel information"
+                    echo "Ngrok log:"
+                    cat ngrok.log || echo "No ngrok log found"
+                fi
             fi
         else
             echo "⚠️ Could not get tunnel information"
+            echo "Checking ngrok process..."
+            ps aux | grep ngrok || echo "No ngrok process found"
         fi
 
     - name: Display Connection Info
@@ -88,17 +106,28 @@ jobs:
             echo "🔌 DNS Port: ${{ env.DNS_PORT }}"
             echo "📱 Use this in your DNS changer app:"
             echo "Primary DNS: ${{ env.DNS_IP }}"
+            echo "=========================================="
+            echo "🎯 Test with: nslookup steam.com ${{ env.DNS_IP }}"
         else
             echo "⚠️ Could not get DNS IP. Check ngrok connection."
+            echo "=========================================="
         fi
-        echo "=========================================="
 
     - name: Keep alive
       run: |
         echo "🟢 DNS Server is running..."
         echo "⏰ Press Ctrl+C in log to stop the workflow"
-        # نگهداری اجرا
+        echo "📊 Testing connection every 30 seconds:"
+        
+        # نگهداری اجرا با تست دوره‌ای
         while true; do
-            echo "✅ Still running at $(date +'%H:%M:%S')"
-            sleep 60
+            if [ -n "${{ env.DNS_IP }}" ]; then
+                # تست اتصال DNS
+                if nslookup steam.com ${{ env.DNS_IP }} >/dev/null 2>&1; then
+                    echo "✅ Connection working at $(date +'%H:%M:%S')"
+                else
+                    echo "❌ Connection failed at $(date +'%H:%M:%S')"
+                fi
+            fi
+            sleep 30
         done
