@@ -9,29 +9,15 @@ jobs:
     - name: Install dnsmasq
       run: |
         sudo apt-get update
-        # نصب فقط dnsmasq بدون بسته‌های اضافی
-        sudo apt-get install -y dnsmasq --no-install-recommends
-        echo "✅ dnsmasq installed successfully"
+        sudo apt-get install -y dnsmasq
+        echo "✅ dnsmasq installed"
 
-    - name: Stop conflicting services
+    - name: Setup dnsmasq configuration
       run: |
-        # توقف سرویس‌های تداخل‌کننده
-        sudo systemctl stop systemd-resolved || true
-        sudo systemctl disable systemd-resolved || true
-        sudo systemctl mask systemd-resolved || true
-        
-        # آزاد کردن پورت 53
-        sudo pkill -f dnsmasq || true
-        sudo pkill -f systemd-resolve || true
-        sleep 2
-
-    - name: Create dnsmasq configuration
-      run: |
-        # ایجاد پیکربندی dnsmasq
+        # ایجاد پیکربندی ساده
         sudo tee /etc/dnsmasq.conf > /dev/null << EOF
         interface=lo
         listen-address=127.0.0.1
-        bind-interfaces
         server=8.8.8.8
         server=1.1.1.1
         address=/steam.com/104.112.119.210
@@ -40,119 +26,105 @@ jobs:
         address=/battle.net/104.16.109.18
         no-hosts
         no-resolv
-        cache-size=1000
-        no-dhcp-interface=
         EOF
 
-    - name: Start dnsmasq manually (no systemd)
-      run: |
-        # راه‌اندازی دستی dnsmasq بدون systemd
-        sudo pkill -f dnsmasq || true
+        # راه اندازی dnsmasq
+        sudo systemctl restart dnsmasq
         sleep 2
-        
-        # اجرای dnsmasq در پس‌زمینه
-        sudo dnsmasq --no-daemon --conf-file=/etc/dnsmasq.conf --log-queries &
-        DNSMASQ_PID=$!
-        echo $DNSMASQ_PID > dnsmasq.pid
-        sleep 3
-        
-        # تست DNS
-        echo "Testing DNS server..."
-        if nslookup steam.com 127.0.0.1; then
-            echo "✅ DNS server is working!"
-        else
-            echo "❌ DNS server failed - checking process..."
-            ps aux | grep dnsmasq
-            exit 1
-        fi
+        nslookup steam.com 127.0.0.1 && echo "✅ DNS working"
 
-    - name: Download and setup Ngrok
+    - name: Download Ngrok (RDP Proven Method)
       run: |
-        # دانلود ngrok
-        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
-        tar -xzf ngrok-v3-stable-linux-amd64.tgz
+        # روش دانلود جایگزین (مثل RDP)
+        curl -o ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz || \
+        wget -O ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        
+        tar -xzf ngrok.tgz
         chmod +x ngrok
-        
-        # تنظیم auth token
-        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        
-        # راه اندازی تونل برای پورت 53
-        ./ngrok tcp 53 --log=stdout > ngrok.log 2>&1 &
-        echo $! > ngrok.pid
-        echo "🔄 Starting ngrok tunnel..."
-        sleep 20
+        ./ngrok version && echo "✅ Ngrok downloaded"
 
-    - name: Get connection information
+    - name: Setup Ngrok Authentication
       run: |
-        # دریافت اطلاعات تونل
-        echo "Getting tunnel information..."
+        # تنظیم authtoken (مثل RDP)
+        ./ngrok authtoken "${{ secrets.NGROK_AUTH_TOKEN }}"
+        echo "✅ Ngrok authenticated"
+
+    - name: Start Ngrok Tunnel (RDP Style)
+      run: |
+        # روش راه اندازی تونل مثل RDP
+        echo "🌐 Starting Ngrok tunnel for DNS..."
         
-        # روش مستقیم از log
-        if [ -f "ngrok.log" ]; then
-            TUNNEL_URL=$(grep -o "url=tcp://[^ ]*" ngrok.log | head -1 | cut -d'=' -f2 || echo "")
+        # اجرای ngrok در پس‌زمینه (مثل RDP)
+        nohup ./ngrok tcp 53 --log=stdout > ngrok.log 2>&1 &
+        
+        # منتظر ماندن برای راه اندازی
+        sleep 25
+        
+        # بررسی وضعیت ngrok
+        if ps aux | grep -q "[n]grok"; then
+            echo "✅ Ngrok tunnel is running"
+            
+            # دریافت آدرس از log (مثل RDP)
+            TUNNEL_URL=$(grep "started tunnel" ngrok.log | grep -o "url=tcp://[^ ]*" | cut -d'=' -f2 || echo "")
+            
             if [ -n "$TUNNEL_URL" ]; then
                 DNS_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
                 DNS_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
+                echo "🌐 Tunnel URL: $TUNNEL_URL"
+                echo "🔢 IP: $DNS_IP"
+                echo "🔌 Port: $DNS_PORT"
             else
-                # استفاده از آدرس پیش‌فرض ngrok
+                # استفاده از روش جایگزین
                 DNS_IP="0.tcp.ngrok.io"
                 DNS_PORT="53"
+                echo "ℹ️ Using default ngrok address"
             fi
         else
+            echo "❌ Ngrok failed to start"
+            cat ngrok.log || echo "No log file"
             DNS_IP="0.tcp.ngrok.io"
             DNS_PORT="53"
         fi
         
-        echo "🌐 DNS_IP=$DNS_IP"
-        echo "🔌 DNS_PORT=$DNS_PORT"
         echo "DNS_IP=$DNS_IP" >> $GITHUB_ENV
         echo "DNS_PORT=$DNS_PORT" >> $GITHUB_ENV
 
-    - name: Display connection info
+    - name: Display Connection Information
       run: |
         echo "=========================================="
-        echo "🎯 YOUR PERSONAL DNS SERVER IS READY!"
+        echo "🎯 DNS SERVER READY - USE IN DNS CHANGER APP"
         echo "=========================================="
-        echo "🔢 DNS IP: ${{ env.DNS_IP }}"
-        echo "🔌 DNS Port: ${{ env.DNS_PORT }}"
-        echo ""
-        echo "📱 در اپلیکیشن DNS Changer گوشی:"
         echo "Primary DNS: ${{ env.DNS_IP }}"
         echo "Port: ${{ env.DNS_PORT }}"
         echo ""
-        echo "🔧 Test connection:"
-        echo "nslookup steam.com ${{ env.DNS_IP }}"
+        echo "📱 در اپلیکیشن DNS Changer:"
+        echo "Address: ${{ env.DNS_IP }}"
+        echo "Port: ${{ env.DNS_PORT }}"
+        echo ""
+        echo "🔧 Test: nslookup steam.com ${{ env.DNS_IP }}"
         echo "=========================================="
 
-    - name: Keep alive and monitor
+    - name: Keep Alive (Like RDP)
       run: |
+        # روش نگهداری مانند RDP
         echo "🟢 DNS Server is running..."
-        echo "💡 Press the 'Cancel workflow' button in GitHub to stop"
+        echo "💡 Press 'Cancel workflow' to stop"
         echo ""
         
-        COUNTER=0
         while true; do
-            COUNTER=$((COUNTER + 1))
-            echo "⏰ Running for $((COUNTER * 30)) seconds..."
-            
-            # تست سلامت DNS
+            # تست سلامت
             if nslookup steam.com 127.0.0.1 >/dev/null 2>&1; then
-                echo "✅ DNS Server: Healthy"
+                echo "✅ DNS: OK - $(date +'%H:%M:%S')"
             else
-                echo "❌ DNS Server: Not responding - restarting..."
-                sudo pkill -f dnsmasq || true
-                sudo dnsmasq --no-daemon --conf-file=/etc/dnsmasq.conf &
-                sleep 5
+                echo "❌ DNS: Restarting..."
+                sudo systemctl restart dnsmasq
             fi
             
-            # تست سلامت Ngrok
-            if [ -f "ngrok.pid" ] && ps -p $(cat ngrok.pid) >/dev/null 2>&1; then
-                echo "✅ Ngrok Tunnel: Active"
-            else
-                echo "❌ Ngrok Tunnel: Down - restarting..."
-                pkill -f ngrok || true
-                ./ngrok tcp 53 --log=stdout > ngrok.log 2>&1 &
-                echo $! > ngrok.pid
+            # بررسی ngrok
+            if ! ps aux | grep -q "[n]grok"; then
+                echo "🔄 Restarting ngrok..."
+                pkill ngrok || true
+                nohup ./ngrok tcp 53 --log=stdout > ngrok.log 2>&1 &
                 sleep 15
             fi
             
