@@ -13,7 +13,7 @@ jobs:
 
     - name: Setup dnsmasq configuration
       run: |
-        # ایجاد پیکربندی ساده
+        # ایجاد پیکربندی ساده با آدرس‌های معتبر
         sudo tee /etc/dnsmasq.conf > /dev/null << EOF
         port=5353
         listen-address=127.0.0.1
@@ -21,7 +21,7 @@ jobs:
         server=1.1.1.1
         address=/mlbb.com/104.16.121.233
         address=/mobilelegends.com/104.18.122.45
-        address=/moonton.com/104.18.123.456
+        # حذف آدرس نامعتبر moonton.com
         no-hosts
         no-resolv
         EOF
@@ -36,9 +36,9 @@ jobs:
         sudo dnsmasq --port=5353 --no-daemon &
         sleep 3
         
-        # تست DNS با dig (که از پورت غیر استاندارد پشتیبانی می‌کند)
-        dig @127.0.0.1 -p 5353 mlbb.com +short
-        echo "✅ DNS server is working"
+        # تست DNS با dig
+        echo "Testing DNS server..."
+        dig @127.0.0.1 -p 5353 mlbb.com +short && echo "✅ DNS server is working"
 
     - name: Download Ngrok
       run: |
@@ -46,7 +46,6 @@ jobs:
         curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o ngrok.tgz
         tar -xzf ngrok.tgz
         chmod +x ngrok
-        ./ngrok version
 
     - name: Setup Ngrok authentication
       run: |
