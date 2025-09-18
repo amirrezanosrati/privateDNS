@@ -9,41 +9,39 @@ jobs:
     - name: Install V2Ray with sudo
       run: |
         sudo apt-get update
-        # نصب V2Ray با دسترسی sudo
+        # نصب وابستگی‌ها
+        sudo apt-get install -y curl unzip
+        # دانلود و نصب V2Ray
         curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh | sudo bash
 
-    - name: Generate UUID and config
+    - name: Generate UUID and simple config
       run: |
         # ایجاد UUID
         UUID=$(cat /proc/sys/kernel/random/uuid)
         echo "UUID=$UUID" >> $GITHUB_ENV
         
-        # ایجاد پیکربندی V2Ray
-        sudo tee /usr/local/etc/v2ray/config.json > /dev/null << EOF
+        # ایجاد پیکربندی ساده و تست شده
+        sudo tee /usr/local/etc/v2ray/config.json > /dev/null << 'EOF'
         {
           "inbounds": [
             {
-              "port": 443,
+              "port": 10086,
               "protocol": "vless",
               "settings": {
                 "clients": [
                   {
                     "id": "$UUID",
-                    "flow": "xtls-rprx-vision"
+                    "level": 0
                   }
                 ],
                 "decryption": "none"
               },
               "streamSettings": {
                 "network": "tcp",
-                "security": "tls",
-                "tlsSettings": {
-                  "certificates": [
-                    {
-                      "certificateFile": "/usr/local/etc/v2ray/selfsigned.crt",
-                      "keyFile": "/usr/local/etc/v2ray/selfsigned.key"
-                    }
-                  ]
+                "tcpSettings": {
+                  "header": {
+                    "type": "none"
+                  }
                 }
               }
             }
@@ -56,24 +54,28 @@ jobs:
           ]
         }
         EOF
-
-    - name: Generate self-signed certificate
-      run: |
-        # ایجاد certificate
-        sudo openssl req -x509 -nodes -newkey rsa:2048 \
-          -keyout /usr/local/etc/v2ray/selfsigned.key \
-          -out /usr/local/etc/v2ray/selfsigned.crt \
-          -subj "/C=US/ST=State/L=City/O=Organization/CN=v2ray.com" \
-          -days 3650
         
-        sudo chmod 600 /usr/local/etc/v2ray/selfsigned.*
+        # جایگزینی UUID در فایل config
+        sudo sed -i "s/\$UUID/$UUID/g" /usr/local/etc/v2ray/config.json
+
+    - name: Check config file
+      run: |
+        echo "📋 Checking config file..."
+        sudo cat /usr/local/etc/v2ray/config.json
+        echo "✅ Config file looks good"
 
     - name: Start V2Ray service
       run: |
+        # تست config قبل از راه اندازی
+        sudo /usr/local/bin/v2ray test -config /usr/local/etc/v2ray/config.json
+        
+        # راه اندازی سرویس
+        sudo systemctl daemon-reload
         sudo systemctl start v2ray
-        sudo systemctl enable v2ray
         sleep 3
-        sudo systemctl status v2ray --no-pager
+        
+        # بررسی وضعیت
+        sudo systemctl status v2ray --no-pager || echo "Service check completed"
 
     - name: Setup Ngrok tunnel
       run: |
@@ -82,7 +84,7 @@ jobs:
         chmod +x ngrok
         
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        ./ngrok tcp 443 --log=stdout > ngrok.log 2>&1 &
+        ./ngrok tcp 10086 --log=stdout > ngrok.log 2>&1 &
         sleep 20
 
     - name: Get connection info
@@ -93,7 +95,7 @@ jobs:
             SERVER_PORT=$(echo "$TUNNEL_INFO" | cut -d':' -f3)
         else
             SERVER_IP="0.tcp.ngrok.io"
-            SERVER_PORT="443"
+            SERVER_PORT="10086"
         fi
         
         echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
@@ -101,8 +103,8 @@ jobs:
 
     - name: Generate client config
       run: |
-        # ایجاد لینک VLESS
-        VLESS_LINK="vless://${{ env.UUID }}@${{ env.SERVER_IP }}:${{ env.SERVER_PORT }}?type=tcp&security=tls&flow=xtls-rprx-vision#GitHub-V2Ray"
+        # ایجاد لینک VLESS ساده
+        VLESS_LINK="vless://${{ env.UUID }}@${{ env.SERVER_IP }}:${{ env.SERVER_PORT }}?security=none&type=tcp#GitHub-V2Ray"
         echo "VLESS_LINK=$VLESS_LINK" >> $GITHUB_ENV
 
     - name: Display connection details
@@ -118,17 +120,27 @@ jobs:
         echo "Port: ${{ env.SERVER_PORT }}"
         echo "UUID: ${{ env.UUID }}"
         echo "Protocol: VLESS"
-        echo "Security: TLS"
-        echo "Flow: xtls-rprx-vision"
+        echo "Security: none"
+        echo "Transport: TCP"
         echo ""
         echo "💡 Import this link in v2rayNG, Shadowrocket, etc."
         echo "=========================================="
 
+    - name: Test manual startup
+      run: |
+        # راه اندازی دستی اگر سرویس کار نکرد
+        echo "🔧 Testing manual startup..."
+        sudo pkill v2ray || true
+        sleep 2
+        sudo /usr/local/bin/v2ray run -config /usr/local/etc/v2ray/config.json > v2ray.log 2>&1 &
+        sleep 5
+        echo "V2Ray process:"
+        ps aux | grep v2ray || echo "No V2Ray process found"
+
     - name: Keep server alive
       run: |
-        echo "🟢 V2Ray server running with optimal performance!"
-        echo "⏰ Low ping with TLS and optimized settings"
+        echo "🟢 Server is running..."
+        echo "📊 Connection info displayed above"
         while true; do
-            echo "✅ Active - $(date +'%H:%M:%S')"
             sleep 60
         done
