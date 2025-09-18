@@ -6,25 +6,21 @@ jobs:
   v2ray-server:
     runs-on: ubuntu-latest
     steps:
-    - name: Install V2Ray
+    - name: Install V2Ray with sudo
       run: |
         sudo apt-get update
-        # نصب V2Ray از اسکریپت رسمی
-        bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
-        
-    - name: Generate optimized VLESS config
+        # نصب V2Ray با دسترسی sudo
+        curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh | sudo bash
+
+    - name: Generate UUID and config
       run: |
-        # ایجاد UUID تصادفی
+        # ایجاد UUID
         UUID=$(cat /proc/sys/kernel/random/uuid)
+        echo "UUID=$UUID" >> $GITHUB_ENV
         
-        # ایجاد پیکربندی بهینه برای سرعت و پینگ پایین
+        # ایجاد پیکربندی V2Ray
         sudo tee /usr/local/etc/v2ray/config.json > /dev/null << EOF
         {
-          "log": {
-            "loglevel": "warning",
-            "access": "/var/log/v2ray/access.log",
-            "error": "/var/log/v2ray/error.log"
-          },
           "inbounds": [
             {
               "port": 443,
@@ -33,13 +29,10 @@ jobs:
                 "clients": [
                   {
                     "id": "$UUID",
-                    "flow": "xtls-rprx-vision",
-                    "level": 0,
-                    "email": "user@v2ray.com"
+                    "flow": "xtls-rprx-vision"
                   }
                 ],
-                "decryption": "none",
-                "fallbacks": []
+                "decryption": "none"
               },
               "streamSettings": {
                 "network": "tcp",
@@ -50,18 +43,8 @@ jobs:
                       "certificateFile": "/usr/local/etc/v2ray/selfsigned.crt",
                       "keyFile": "/usr/local/etc/v2ray/selfsigned.key"
                     }
-                  ],
-                  "alpn": ["http/1.1"]
-                },
-                "tcpSettings": {
-                  "header": {
-                    "type": "none"
-                  }
+                  ]
                 }
-              },
-              "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls"]
               }
             }
           ],
@@ -69,32 +52,15 @@ jobs:
             {
               "protocol": "freedom",
               "settings": {}
-            },
-            {
-              "protocol": "blackhole",
-              "settings": {},
-              "tag": "blocked"
             }
-          ],
-          "routing": {
-            "domainStrategy": "IPIfNonMatch",
-            "rules": [
-              {
-                "type": "field",
-                "ip": ["geoip:private"],
-                "outboundTag": "blocked"
-              }
-            ]
-          }
+          ]
         }
         EOF
-        
-        echo "UUID=$UUID" >> $GITHUB_ENV
 
     - name: Generate self-signed certificate
       run: |
-        # ایجاد certificate خودامضا
-        openssl req -x509 -nodes -newkey rsa:2048 \
+        # ایجاد certificate
+        sudo openssl req -x509 -nodes -newkey rsa:2048 \
           -keyout /usr/local/etc/v2ray/selfsigned.key \
           -out /usr/local/etc/v2ray/selfsigned.crt \
           -subj "/C=US/ST=State/L=City/O=Organization/CN=v2ray.com" \
@@ -121,7 +87,6 @@ jobs:
 
     - name: Get connection info
       run: |
-        # دریافت اطلاعات تونل
         TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels | grep -o 'tcp://[^"]*' | head -1)
         if [ -n "$TUNNEL_INFO" ]; then
             SERVER_IP=$(echo "$TUNNEL_INFO" | cut -d':' -f2 | sed 's#//##')
@@ -134,32 +99,10 @@ jobs:
         echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
         echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
 
-    - name: Generate client configs
+    - name: Generate client config
       run: |
-        # ایجاد کانفیگ کلاینت
-        cat > vless-config.json << EOF
-        {
-          "v": "2",
-          "ps": "V2Ray-VLESS-GitHub",
-          "add": "${{ env.SERVER_IP }}",
-          "port": "${{ env.SERVER_PORT }}",
-          "id": "${{ env.UUID }}",
-          "aid": "0",
-          "net": "tcp",
-          "type": "none",
-          "host": "",
-          "path": "",
-          "tls": "tls",
-          "sni": "",
-          "alpn": "http/1.1",
-          "fp": "chrome",
-          "flow": "xtls-rprx-vision"
-        }
-        EOF
-        
-        # ایجاد لینک اشتراک‌گذاری
-        VLESS_LINK="vless://${{ env.UUID }}@${{ env.SERVER_IP }}:${{ env.SERVER_PORT }}?type=tcp&security=tls&flow=xtls-rprx-vision&alpn=http%2F1.1&fp=chrome#V2Ray-VLESS-GitHub"
-        
+        # ایجاد لینک VLESS
+        VLESS_LINK="vless://${{ env.UUID }}@${{ env.SERVER_IP }}:${{ env.SERVER_PORT }}?type=tcp&security=tls&flow=xtls-rprx-vision#GitHub-V2Ray"
         echo "VLESS_LINK=$VLESS_LINK" >> $GITHUB_ENV
 
     - name: Display connection details
@@ -167,33 +110,25 @@ jobs:
         echo "=========================================="
         echo "🚀 V2Ray VLESS SERVER READY!"
         echo "=========================================="
-        echo "🔗 Direct Link:"
+        echo "🔗 VLESS Link:"
         echo "${{ env.VLESS_LINK }}"
         echo ""
-        echo "📋 Configuration Details:"
+        echo "📋 Configuration:"
         echo "Server: ${{ env.SERVER_IP }}"
         echo "Port: ${{ env.SERVER_PORT }}"
         echo "UUID: ${{ env.UUID }}"
         echo "Protocol: VLESS"
-        echo "Transport: TCP"
         echo "Security: TLS"
         echo "Flow: xtls-rprx-vision"
-        echo "ALPN: http/1.1"
         echo ""
-        echo "💡 Client Apps:"
-        echo "• Windows: v2rayN, Qv2ray"
-        echo "• Android: v2rayNG, AnXray"
-        echo "• iOS: Shadowrocket, Stash"
-        echo "• Mac: V2RayX, Qv2ray"
+        echo "💡 Import this link in v2rayNG, Shadowrocket, etc."
         echo "=========================================="
 
     - name: Keep server alive
       run: |
-        echo "🟢 V2Ray server is running with optimal settings!"
-        echo "⏰ Ping optimized with TLS 1.3 and TCP fast open"
-        echo "🚀 High speed with vision flow control"
-        echo ""
+        echo "🟢 V2Ray server running with optimal performance!"
+        echo "⏰ Low ping with TLS and optimized settings"
         while true; do
-            echo "✅ Server active - $(date +'%H:%M:%S')"
+            echo "✅ Active - $(date +'%H:%M:%S')"
             sleep 60
         done
