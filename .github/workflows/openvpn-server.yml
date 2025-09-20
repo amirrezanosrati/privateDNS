@@ -1,119 +1,305 @@
-name: Guaranteed VPN Server
+name: Advanced Anti-Filter VPN
 
 on:
   workflow_dispatch:
     inputs:
       vpn_type:
-        description: 'Select VPN Type'
+        description: 'نوع سرویس VPN'
         required: true
-        default: 'socks5'
+        default: 'v2ray'
         type: choice
         options:
-        - 'socks5'
-        - 'http'
-        - 'ssh'
+        - 'v2ray'
+        - 'xray'
+        - 'shadowsocks'
+        - 'naiveproxy'
+        - 'tuic'
+        - 'hysteria'
+        - 'all'
+
+env:
+  MAX_DURATION: 36000  # 10 hours
 
 jobs:
-  deploy-vpn:
+  deploy-advanced-vpn:
     runs-on: ubuntu-latest
+    timeout-minutes: 600
+    
     steps:
-    - name: Check Docker availability
+    - name: Setup basic tools
       run: |
-        echo "Docker version:"
-        docker --version || echo "Docker not available"
-        echo "Containerd version:"
-        containerd --version || echo "Containerd not available"
+        sudo apt-get update
+        sudo apt-get install -y wget curl unzip jq git build-essential
+        echo "✅ ابزارهای پایه نصب شدند"
 
-    - name: Deploy selected VPN
+    - name: Install and configure selected VPN
       run: |
         case "${{ github.event.inputs.vpn_type }}" in
-          "socks5")
-            echo "Deploying SOCKS5 proxy..."
-            docker run -d --name socks5 \
-              -p 1080:1080 \
-              serjs/go-socks5-proxy \
-              -user admin \
-              -password $(openssl rand -base64 12)
-            echo "VPN_PORT=1080" >> $GITHUB_ENV
-            ;;
-          "http")
-            echo "Deploying HTTP proxy..."
-            docker run -d --name http-proxy \
-              -p 3128:3128 \
-              ubuntu/squid
-            echo "VPN_PORT=3128" >> $GITHUB_ENV
-            ;;
-          "ssh")
-            echo "Deploying SSH server..."
-            SSH_PASS=$(openssl rand -base64 12)
-            docker run -d --name ssh-server \
-              -p 22:22 \
-              -e PASSWORD=$SSH_PASS \
-              linuxserver/openssh-server
-            echo "VPN_PORT=22" >> $GITHUB_ENV
-            echo "SSH_PASS=$SSH_PASS" >> $GITHUB_ENV
+          "v2ray"|"all")
+            echo "📦 نصب V2Ray..."
+            bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
+            
+            # ایجاد کانفیگ پیشرفته
+            UUID=$(cat /proc/sys/kernel/random/uuid)
+            sudo tee /usr/local/etc/v2ray/config.json > /dev/null << EOF
+{
+  "inbounds": [{
+    "port": 10086,
+    "protocol": "vmess",
+    "settings": {
+      "clients": [{
+        "id": "$UUID",
+        "alterId": 0,
+        "security": "auto"
+      }]
+    },
+    "streamSettings": {
+      "network": "ws",
+      "wsSettings": {
+        "path": "/graphql"
+      }
+    }
+  }],
+  "outbounds": [{
+    "protocol": "freedom",
+    "settings": {}
+  }]
+}
+EOF
+            sudo systemctl start v2ray
+            echo "V2RAY_PORT=10086" >> $GITHUB_ENV
+            echo "V2RAY_UUID=$UUID" >> $GITHUB_ENV
             ;;
         esac
 
-    - name: Verify container running
-      run: |
-        sleep 5
-        if docker ps | grep -q "${{ github.event.inputs.vpn_type }}"; then
-          echo "✅ Container is running successfully"
-        else
-          echo "❌ Container failed to start"
-          docker logs ${{ github.event.inputs.vpn_type }} || echo "No logs available"
-          exit 1
-        fi
+        case "${{ github.event.inputs.vpn_type }}" in
+          "xray"|"all")
+            echo "📦 نصب XRay..."
+            bash <(curl -L https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)
+            
+            XRAY_UUID=$(cat /proc/sys/kernel/random/uuid)
+            sudo tee /usr/local/etc/xray/config.json > /dev/null << EOF
+{
+  "inbounds": [{
+    "port": 10010,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{
+        "id": "$XRAY_UUID",
+        "flow": "xtls-rprx-vision"
+      }],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "www.amazon.com:443",
+        "xver": 0
+      }
+    }
+  }]
+}
+EOF
+            sudo systemctl start xray
+            echo "XRAY_PORT=10010" >> $GITHUB_ENV
+            echo "XRAY_UUID=$XRAY_UUID" >> $GITHUB_ENV
+            ;;
+        esac
 
-    - name: Setup Ngrok tunnel
+        case "${{ github.event.inputs.vpn_type }}" in
+          "shadowsocks"|"all")
+            echo "📦 نصب Shadowsocks..."
+            pip3 install shadowsocks
+            
+            SS_PASSWORD=$(openssl rand -base64 16)
+            SS_METHOD="aes-256-gcm"
+            
+            sudo tee /etc/shadowsocks.json > /dev/null << EOF
+{
+    "server":"0.0.0.0",
+    "server_port":8388,
+    "password":"$SS_PASSWORD",
+    "method":"$SS_METHOD",
+    "fast_open":true,
+    "mode":"tcp_only"
+}
+EOF
+            ssserver -c /etc/shadowsocks.json -d start
+            echo "SS_PORT=8388" >> $GITHUB_ENV
+            echo "SS_PASSWORD=$SS_PASSWORD" >> $GITHUB_ENV
+            echo "SS_METHOD=$SS_METHOD" >> $GITHUB_ENV
+            ;;
+        esac
+
+    - name: Setup multiple Ngrok tunnels
       run: |
-        # Download ngrok
+        # دانلود Ngrok
         curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
         chmod +x ngrok
-        
-        # Set auth token
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
         
-        # Start tunnel
-        ./ngrok tcp ${{ env.VPN_PORT }} > ngrok.log 2>&1 &
-        sleep 10
+        # راه اندازی تونل‌های مختلف
+        case "${{ github.event.inputs.vpn_type }}" in
+          "v2ray")
+            ./ngrok tcp 10086 > ngrok_v2ray.log 2>&1 &
+            ;;
+          "xray")
+            ./ngrok tcp 10010 > ngrok_xray.log 2>&1 &
+            ;;
+          "shadowsocks")
+            ./ngrok tcp 8388 > ngrok_ss.log 2>&1 &
+            ;;
+          "all")
+            ./ngrok tcp 10086 > ngrok_v2ray.log 2>&1 &
+            ./ngrok tcp 10010 > ngrok_xray.log 2>&1 &
+            ./ngrok tcp 8388 > ngrok_ss.log 2>&1 &
+            ;;
+        esac
+        
+        sleep 15
 
-    - name: Get connection info
+    - name: Get tunnel information
       run: |
-        sleep 10
-        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "{}")
+        # دریافت اطلاعات تونل‌ها
+        TUNNELS_JSON=$(curl -s http://localhost:4040/api/tunnels)
         
-        if echo "$TUNNEL_INFO" | grep -q 'tcp://'; then
-          TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o 'tcp://[^"]*' | head -1)
-          SERVER_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
-          SERVER_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
-        else
-          SERVER_IP="0.tcp.ngrok.io"
-          SERVER_PORT="${{ env.VPN_PORT }}"
-        fi
-        
-        echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
-        echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
+        # استخراج اطلاعات هر تونل
+        echo "$TUNNELS_JSON" | jq -r '.tunnels[] | .name + " " + .public_url' | while read tunnel; do
+          name=$(echo $tunnel | cut -d' ' -f1)
+          url=$(echo $tunnel | cut -d' ' -f2-)
+          
+          if echo "$name" | grep -q "tcp-10086"; then
+            echo "V2RAY_URL=$url" >> $GITHUB_ENV
+          elif echo "$name" | grep -q "tcp-10010"; then
+            echo "XRAY_URL=$url" >> $GITHUB_ENV
+          elif echo "$name" | grep -q "tcp-8388"; then
+            echo "SS_URL=$url" >> $GITHUB_ENV
+          fi
+        done
+
+    - name: Generate client configurations
+      run: |
+        # تولید کانفیگ کلاینت
+        case "${{ github.event.inputs.vpn_type }}" in
+          "v2ray"|"all")
+            if [ -n "${{ env.V2RAY_URL }}" ]; then
+              V2RAY_IP=$(echo "${{ env.V2RAY_URL }}" | cut -d':' -f2 | sed 's#//##')
+              V2RAY_PORT=$(echo "${{ env.V2RAY_URL }}" | cut -d':' -f3)
+              
+              cat > v2ray_config.json << EOF
+{
+  "v": "2",
+  "ps": "GitHub-V2Ray",
+  "add": "$V2RAY_IP",
+  "port": "$V2RAY_PORT",
+  "id": "${{ env.V2RAY_UUID }}",
+  "aid": "0",
+  "net": "ws",
+  "type": "none",
+  "path": "/graphql",
+  "tls": "none"
+}
+EOF
+              V2RAY_LINK="vmess://$(base64 -w 0 v2ray_config.json)"
+              echo "V2RAY_LINK=$V2RAY_LINK" >> $GITHUB_ENV
+            fi
+            ;;
+        esac
+
+        case "${{ github.event.inputs.vpn_type }}" in
+          "shadowsocks"|"all")
+            if [ -n "${{ env.SS_URL }}" ]; then
+              SS_IP=$(echo "${{ env.SS_URL }}" | cut -d':' -f2 | sed 's#//##')
+              SS_PORT=$(echo "${{ env.SS_URL }}" | cut -d':' -f3)
+              
+              SS_LINK="ss://$(echo -n "${{ env.SS_METHOD }}:${{ env.SS_PASSWORD }}" | base64 -w 0)@$SS_IP:$SS_PORT#GitHub-Shadowsocks"
+              echo "SS_LINK=$SS_LINK" >> $GITHUB_ENV
+            fi
+            ;;
+        esac
 
     - name: Display connection details
       run: |
-        echo "=========================================="
-        echo "🚀 VPN Server Ready!"
-        echo "=========================================="
-        echo "Type: ${{ github.event.inputs.vpn_type }}"
-        echo "Server: ${{ env.SERVER_IP }}"
-        echo "Port: ${{ env.SERVER_PORT }}"
+        echo "================================================"
+        echo "🚀 سرویس ضد فیلتر آماده است!"
+        echo "================================================"
+        echo "⏰ مدت زمان فعال: 10 ساعت"
+        echo "🔧 پروتکل‌های فعال: ${{ github.event.inputs.vpn_type }}"
+        echo ""
         
-        if [ "${{ github.event.inputs.vpn_type }}" = "ssh" ]; then
-          echo "Username: root"
-          echo "Password: ${{ env.SSH_PASS }}"
+        if [ -n "${{ env.V2RAY_LINK }}" ]; then
+          echo "🔵 V2Ray (VMESS):"
+          echo "${{ env.V2RAY_LINK }}"
+          echo ""
         fi
         
-        echo "⏰ This server will be active for 6 hours"
-        echo "=========================================="
+        if [ -n "${{ env.XRAY_URL }}" ]; then
+          echo "🔴 XRay (VLESS+REALITY):"
+          echo "آدرس: $(echo '${{ env.XRAY_URL }}' | cut -d':' -f2 | sed 's#//##')"
+          echo "پورت: $(echo '${{ env.XRAY_URL }}' | cut -d':' -f3)"
+          echo "UUID: ${{ env.XRAY_UUID }}"
+          echo ""
+        fi
+        
+        if [ -n "${{ env.SS_LINK }}" ]; then
+          echo "🟢 Shadowsocks:"
+          echo "${{ env.SS_LINK }}"
+          echo ""
+        fi
+        
+        echo "================================================"
+        echo "💡 راهنمای استفاده:"
+        echo "1. لینک‌ها را در کلاینت مناسب import کنید"
+        echo "2. از پروتکل‌های مختلف تست کنید"
+        echo "3. بهترین پروتکل برای منطقه خود را انتخاب کنید"
+        echo "================================================"
 
-    - name: Keep server alive
+    - name: Install monitoring tools
       run: |
-        echo "🟢 VPN server is running for 6 hours..."
-        sleep 21600
+        # نصب ابزارهای مانیتورینگ
+        pip3 install speedtest-cli
+        sudo apt-get install -y vnstat
+        
+        # شروع مانیتورینگ ترافیک
+        vnstat -d -i eth0 > traffic.log 2>&1 &
+
+    - name: Continuous monitoring
+      run: |
+        echo "📊 شروع مانیتورینگ سرویس..."
+        counter=0
+        while [ $counter -lt $MAX_DURATION ]; do
+          # بررسی وضعیت سرویس‌ها
+          echo "🔄 بررسی وضعیت ($((counter/60)) دقیقه گذشته)"
+          
+          # تست سرعت هر 30 دقیقه
+          if [ $((counter % 1800)) -eq 0 ]; then
+            echo "🧪 تست سرعت..."
+            speedtest-cli --simple >> speedtest.log 2>&1 || echo "تست سرعت失敗"
+          fi
+          
+          # نمایش ترافیک مصرفی
+          if [ $((counter % 300)) -eq 0 ]; then
+            echo "📶 ترافیک مصرفی:"
+            vnstat -h -i eth0 | tail -5 || echo "نمایش ترافیک失敗"
+          fi
+          
+          sleep 60
+          counter=$((counter + 60))
+        done
+
+    - name: Cleanup and notify
+      if: always()
+      run: |
+        echo "🧹 پاک‌سازی منابع..."
+        pkill -f ngrok || true
+        pkill -f ssserver || true
+        sudo systemctl stop v2ray xray 2>/dev/null || true
+        
+        echo "✅ پاک‌سازی完成"
+        echo "📊 خلاصه عملکرد:"
+        cat speedtest.log 2>/dev/null || echo "لاگ تست سرعت موجود نیست"
+        echo ""
+        echo "📈 ترافیک کل مصرفی:"
+        vnstat -d -i eth0 2>/dev/null || echo "آمار ترافیک موجود نیست"
