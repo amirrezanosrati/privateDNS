@@ -1,0 +1,37 @@
+name: SOCKS5 Server
+
+on:
+  workflow_dispatch
+
+jobs:
+  deploy-socks5:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install SOCKS5
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dante-server
+
+    - name: Configure SOCKS5
+      run: |
+        sudo tee /etc/danted.conf > /dev/null << EOF
+logoutput: syslog
+user.privileged: root
+user.unprivileged: nobody
+internal: 0.0.0.0 port = 1080
+external: eth0
+method: username
+clientmethod: none
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+}
+pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    protocol: tcp udp
+}
+EOF
+
+    - name: Start SOCKS5
+      run: |
+        sudo systemctl start danted
+        sleep 3
