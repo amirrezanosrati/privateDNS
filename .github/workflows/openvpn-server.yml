@@ -1,28 +1,47 @@
-name: Cloudflare Tunnel VPN
+name: Auto-Fallback VPN
 
 on:
   workflow_dispatch
 
 jobs:
-  deploy-cf-tunnel:
+  deploy-smart-vpn:
     runs-on: ubuntu-latest
     steps:
-    - name: Install Cloudflared
+    - name: Try multiple methods
       run: |
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-        sudo dpkg -i cloudflared-linux-amd64.deb
-        
-    - name: Authenticate Cloudflare
+        # روش اول: Docker
+        if command -v docker &> /dev/null; then
+          echo "🐳 استفاده از Docker"
+          docker run -d -p 1080:1080 serjs/go-socks5-proxy
+          echo "METHOD=docker" >> $GITHUB_ENV
+          echo "PORT=1080" >> $GITHUB_ENV
+          
+        # روش دوم: Podman
+        elif command -v podman &> /dev/null; then
+          echo "📦 استفاده از Podman"
+          podman run -d -p 1080:1080 docker.io/serjs/go-socks5-proxy
+          echo "METHOD=podman" >> $GITHUB_ENV
+          echo "PORT=1080" >> $GITHUB_ENV
+          
+        # روش سوم: نرم‌افزار مستقیم
+        else
+          echo "⚡ استفاده از روش مستقیم"
+          sudo apt-get install -y tinyproxy
+          sudo sed -i 's/^Port 8888/Port 8080/' /etc/tinyproxy/tinyproxy.conf
+          sudo systemctl restart tinyproxy
+          echo "METHOD=direct" >> $GITHUB_ENV
+          echo "PORT=8080" >> $GITHUB_ENV
+        fi
+
+    - name: Setup tunnel
       run: |
-        echo "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" > account_id
-        echo "${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}" > tunnel_token
-        
-    - name: Create tunnel
-      run: |
-        cloudflared tunnel create github-vpn
-        cloudflared tunnel route dns github-vpn vpn.$GITHUB_REPOSITORY_OWNER.github.com
-        
-    - name: Configure and run tunnel
-      run: |
-        cloudflared tunnel run github-vpn > cloudflared.log 2>&1 &
+        curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
+        chmod +x ngrok
+        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        ./ngrok tcp ${{ env.PORT }} > ngrok.log 2>&1 &
         sleep 10
+
+    - name: Display info
+      run: |
+        echo "✅ سرویس با روش ${{ env.METHOD }} راه‌اندازی شد"
+        echo "🔌 پورت: ${{ env.PORT }}"
