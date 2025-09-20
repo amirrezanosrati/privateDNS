@@ -1,4 +1,4 @@
-name: صهقثلعشقی
+name: wireguard
 
 on:
   workflow_dispatch
