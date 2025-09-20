@@ -1,199 +1,119 @@
-name: OpenVPN Server
+name: Guaranteed VPN Server
 
 on:
-  workflow_dispatch
+  workflow_dispatch:
+    inputs:
+      vpn_type:
+        description: 'Select VPN Type'
+        required: true
+        default: 'socks5'
+        type: choice
+        options:
+        - 'socks5'
+        - 'http'
+        - 'ssh'
 
 jobs:
-  deploy-openvpn:
+  deploy-vpn:
     runs-on: ubuntu-latest
     steps:
-    - name: Install OpenVPN
+    - name: Check Docker availability
       run: |
-        sudo apt-get update
-        sudo apt-get install -y openvpn
+        echo "Docker version:"
+        docker --version || echo "Docker not available"
+        echo "Containerd version:"
+        containerd --version || echo "Containerd not available"
 
-    - name: Create minimal OpenVPN config
+    - name: Deploy selected VPN
       run: |
-        # ایجاد یک پیکربندی بسیار ساده
-        sudo mkdir -p /etc/openvpn
-        
-        # ایجاد فایل پیکربندی اصلی
-        sudo tee /etc/openvpn/server.conf > /dev/null << 'EOF'
-port 1194
-proto udp
-dev tun
-secret /etc/openvpn/static.key
-ifconfig 10.8.0.1 10.8.0.2
-route 10.8.0.0 255.255.255.0
-keepalive 10 120
-cipher AES-256-CBC
-persist-key
-persist-tun
-status /var/log/openvpn-status.log
-verb 3
-EOF
+        case "${{ github.event.inputs.vpn_type }}" in
+          "socks5")
+            echo "Deploying SOCKS5 proxy..."
+            docker run -d --name socks5 \
+              -p 1080:1080 \
+              serjs/go-socks5-proxy \
+              -user admin \
+              -password $(openssl rand -base64 12)
+            echo "VPN_PORT=1080" >> $GITHUB_ENV
+            ;;
+          "http")
+            echo "Deploying HTTP proxy..."
+            docker run -d --name http-proxy \
+              -p 3128:3128 \
+              ubuntu/squid
+            echo "VPN_PORT=3128" >> $GITHUB_ENV
+            ;;
+          "ssh")
+            echo "Deploying SSH server..."
+            SSH_PASS=$(openssl rand -base64 12)
+            docker run -d --name ssh-server \
+              -p 22:22 \
+              -e PASSWORD=$SSH_PASS \
+              linuxserver/openssh-server
+            echo "VPN_PORT=22" >> $GITHUB_ENV
+            echo "SSH_PASS=$SSH_PASS" >> $GITHUB_ENV
+            ;;
+        esac
 
-        # ایجاد کلید استاتیک ساده
-        sudo tee /etc/openvpn/static.key > /dev/null << 'EOF'
-#
-# 2048 bit OpenVPN static key
-#
------BEGIN OpenVPN Static key V1-----
-e685f2d6cd8b7c7f8e4c6b7a1d6e8f3b
-4c2d8e7f3a1b6c9d8e7f2a4b6c8d9e1f
-3a5c7e9d1f2b4a6c8e7d9f1a3b5c7e9d
-2f4a6c8e1d3b5f7a9c8e2b4d6f8a1c3e
-5d7f9a2b4c6e8d1f3a5c7e9b1d3f5a7c
-9e2b4d6f8a1c3e5d7f9b2d4f6a8c1e3
-5a7c9e2b4d6f8a1c3e5d7f9b2d4f6a8
-c1e3f5a7c9e2b4d6f8a1c3e5d7f9b2d
-4f6a8c1e3f5a7c9e2b4d6f8a1c3e5d7
-f9b2d4f6a8c1e3f5a7c9e2b4d6f8a1c
-3e5d7f9b2d4f6a8c1e3f5a7c9e2b4d6
-f8a1c3e5d7f9b2d4f6a8c1e3f5a7c9e
-2b4d6f8a1c3e5d7f9b2d4f6a8c1e3f5
-a7c9e2b4d6f8a1c3e5d7f9b2d4f6a8c
-1e3f5a7c9e2b4d6f8a1c3e5d7f9b2d4
-f6a8c1e3f5a7c9e2b4d6f8a1c3e5d7f
------END OpenVPN Static key V1-----
-EOF
-
-    - name: Start OpenVPN
+    - name: Verify container running
       run: |
-        # راه‌اندازی OpenVPN
-        sudo openvpn --daemon --config /etc/openvpn/server.conf
-        sleep 3
-        
-        # بررسی وضعیت
-        if pgrep openvpn; then
-          echo "✅ OpenVPN started successfully"
+        sleep 5
+        if docker ps | grep -q "${{ github.event.inputs.vpn_type }}"; then
+          echo "✅ Container is running successfully"
         else
-          echo "❌ OpenVPN failed to start - trying direct execution"
-          sudo /usr/sbin/openvpn --config /etc/openvpn/server.conf --daemon
-          sleep 3
-          if pgrep openvpn; then
-            echo "✅ OpenVPN started with direct execution"
-          else
-            echo "❌ OpenVPN still failed to start"
-            echo "Trying one more method..."
-            sudo bash -c "cd /etc/openvpn && /usr/sbin/openvpn server.conf --daemon"
-            sleep 3
-            if pgrep openvpn; then
-              echo "✅ OpenVPN started with alternative method"
-            else
-              echo "❌ All OpenVPN start methods failed"
-              exit 1
-            fi
-          fi
+          echo "❌ Container failed to start"
+          docker logs ${{ github.event.inputs.vpn_type }} || echo "No logs available"
+          exit 1
         fi
 
-    - name: Setup Ngrok
+    - name: Setup Ngrok tunnel
       run: |
-        # دانلود Ngrok
-        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
-        tar -xzf ngrok-v3-stable-linux-amd64.tgz
+        # Download ngrok
+        curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz
         chmod +x ngrok
         
-        # تنظیم توکن
+        # Set auth token
         ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
         
-        # راه‌اندازی تونل
-        ./ngrok udp 1194 > /dev/null 2>&1 &
-        echo "Ngrok started for UDP port 1194"
-        sleep 5
+        # Start tunnel
+        ./ngrok tcp ${{ env.VPN_PORT }} > ngrok.log 2>&1 &
+        sleep 10
 
     - name: Get connection info
       run: |
-        # دریافت اطلاعات تونل
-        sleep 5
-        echo "Trying to get tunnel info..."
+        sleep 10
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "{}")
         
-        # چندین روش برای دریافت اطلاعات
-        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null || echo "{}")
-        
-        if echo "$TUNNEL_INFO" | grep -q "udp://"; then
-          SERVER_URL=$(echo "$TUNNEL_INFO" | grep -o "udp://[^,\"]*" | head -1)
-          SERVER_IP=$(echo "$SERVER_URL" | cut -d':' -f2 | sed 's#//##')
-          SERVER_PORT=$(echo "$SERVER_URL" | cut -d':' -f3)
-          echo "✅ Found UDP tunnel: $SERVER_IP:$SERVER_PORT"
+        if echo "$TUNNEL_INFO" | grep -q 'tcp://'; then
+          TUNNEL_URL=$(echo "$TUNNEL_INFO" | grep -o 'tcp://[^"]*' | head -1)
+          SERVER_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
+          SERVER_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
         else
-          # استفاده از آدرس پیش‌فرض
-          SERVER_IP="0.udp.ngrok.io"
-          SERVER_PORT="1194"
-          echo "⚠️  Using default server: $SERVER_IP:$SERVER_PORT"
+          SERVER_IP="0.tcp.ngrok.io"
+          SERVER_PORT="${{ env.VPN_PORT }}"
         fi
         
         echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
         echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
 
-    - name: Create client config
-      run: |
-        # ایجاد پیکربندی کلاینت
-        sudo tee /tmp/client.ovpn > /dev/null << EOF
-client
-dev tun
-proto udp
-remote ${{ env.SERVER_IP }} ${{ env.SERVER_PORT }}
-resolv-retry infinite
-nobind
-persist-key
-persist-tun
-cipher AES-256-CBC
-verb 3
-
-# کلید استاتیک
-<secret>
------BEGIN OpenVPN Static key V1-----
-e685f2d6cd8b7c7f8e4c6b7a1d6e8f3b
-4c2d8e7f3a1b6c9d8e7f2a4b6c8d9e1f
-3a5c7e9d1f2b4a6c8e7d9f1a3b5c7e9d
-2f4a6c8e1d3b5f7a9c8e2b4d6f8a1c3e
-5d7f9a2b4c6e8d1f3a5c7e9b1d3f5a7c
-9e2b4d6f8a1c3e5d7f9b2d4f6a8c1e3
-5a7c9e2b4d6f8a1c3e5d7f9b2d4f6a8
-c1e3f5a7c9e2b4d6f8a1c3e5d7f9b2d
-4f6a8c1e3f5a7c9e2b4d6f8a1c3e5d7
-f9b2d4f6a8c1e3f5a7c9e2b4d6f8a1c
-3e5d7f9b2d4f6a8c1e3f5a7c9e2b4d6
-f8a1c3e5d7f9b2d4f6a8c1e3f5a7c9e
-2b4d6f8a1c3e5d7f9b2d4f6a8c1e3f5
-a7c9e2b4d6f8a1c3e5d7f9b2d4f6a8c
-1e3f5a7c9e2b4d6f8a1c3e5d7f9b2d4
-f6a8c1e3f5a7c9e2b4d6f8a1c3e5d7f
------END OpenVPN Static key V1-----
-</secret>
-EOF
-
-        # ذخیره پیکربندی
-        CLIENT_CONFIG=$(cat /tmp/client.ovpn)
-        echo "CLIENT_CONFIG<<EOF" >> $GITHUB_ENV
-        echo "$CLIENT_CONFIG" >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
-
-    - name: Show connection details
+    - name: Display connection details
       run: |
         echo "=========================================="
-        echo "🚀 OpenVPN Server Ready!"
+        echo "🚀 VPN Server Ready!"
         echo "=========================================="
-        echo "📡 Server: ${{ env.SERVER_IP }}"
-        echo "🚪 Port: ${{ env.SERVER_PORT }}"
-        echo "📋 Protocol: UDP"
-        echo "🔐 Encryption: Static Key"
-        echo ""
-        echo "🔧 Client Configuration:"
-        echo "Copy the content below to a file with .ovpn extension:"
-        echo "=========================================="
-        echo "${{ env.CLIENT_CONFIG }}"
-        echo "=========================================="
-        echo "💡 Import this .ovpn file in your OpenVPN client"
+        echo "Type: ${{ github.event.inputs.vpn_type }}"
+        echo "Server: ${{ env.SERVER_IP }}"
+        echo "Port: ${{ env.SERVER_PORT }}"
+        
+        if [ "${{ github.event.inputs.vpn_type }}" = "ssh" ]; then
+          echo "Username: root"
+          echo "Password: ${{ env.SSH_PASS }}"
+        fi
+        
         echo "⏰ This server will be active for 6 hours"
         echo "=========================================="
 
-    - name: Keep alive
+    - name: Keep server alive
       run: |
-        echo "🟢 Server is running..."
-        echo "OpenVPN process: $(pgrep openvpn || echo 'Not found')"
-        echo "Ngrok process: $(pgrep ngrok || echo 'Not found')"
-        
-        # نگه‌داری سرور برای 6 ساعت
+        echo "🟢 VPN server is running for 6 hours..."
         sleep 21600
