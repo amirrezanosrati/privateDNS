@@ -1,0 +1,76 @@
+name: WireGuard Server
+
+on:
+  workflow_dispatch
+
+jobs:
+  deploy-wireguard:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install WireGuard
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wireguard resolvconf
+
+    - name: Generate keys
+      run: |
+        umask 077
+        wg genkey | tee privatekey | wg pubkey > publickey
+        echo "PRIVATE_KEY=$(cat privatekey)" >> $GITHUB_ENV
+        echo "PUBLIC_KEY=$(cat publickey)" >> $GITHUB_ENV
+
+    - name: Create config
+      run: |
+        sudo tee /etc/wireguard/wg0.conf > /dev/null << EOF
+[Interface]
+Address = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = ${{ env.PRIVATE_KEY }}
+
+[Peer]
+PublicKey = ${{ env.PUBLIC_KEY }}
+AllowedIPs = 10.0.0.2/32
+EOF
+
+    - name: Start WireGuard
+      run: |
+        sudo wg-quick up wg0
+        sleep 3
+
+    - name: Create client config
+      run: |
+        sudo tee /tmp/client.conf > /dev/null << EOF
+[Interface]
+PrivateKey = ${{ env.PRIVATE_KEY }}
+Address = 10.0.0.2/24
+DNS = 8.8.8.8
+
+[Peer]
+PublicKey = ${{ env.PUBLIC_KEY }}
+Endpoint = SERVER_IP:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+
+    - name: Setup Ngrok
+      run: |
+        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar -xzf ngrok-v3-stable-linux-amd64.tgz
+        chmod +x ngrok
+        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        ./ngrok udp 51820 > /dev/null 2>&1 &
+        sleep 5
+
+    - name: Get connection info
+      run: |
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels | grep -o 'udp://[^"]*' | head -1)
+        SERVER_IP=$(echo "$TUNNEL_INFO" | cut -d':' -f2 | sed 's#//##')
+        SERVER_PORT=$(echo "$TUNNEL_INFO" | cut -d':' -f3)
+        echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
+        echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
+
+    - name: Display config
+      run: |
+        CLIENT_CONFIG=$(cat /tmp/client.conf | sed "s/SERVER_IP/$SERVER_IP/g" | sed "s/51820/$SERVER_PORT/g")
+        echo "WireGuard Client Config:"
+        echo "$CLIENT_CONFIG"
