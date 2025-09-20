@@ -1,0 +1,58 @@
+name: Shadowsocks Server
+
+on:
+  workflow_dispatch
+
+jobs:
+  deploy-shadowsocks:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install Shadowsocks
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-pip
+        sudo pip3 install shadowsocks
+
+    - name: Create config
+      run: |
+        PASSWORD=$(openssl rand -base64 12)
+        echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
+        
+        sudo tee /etc/shadowsocks.json > /dev/null << EOF
+{
+    "server":"0.0.0.0",
+    "server_port":8388,
+    "password":"$PASSWORD",
+    "method":"aes-256-cfb"
+}
+EOF
+
+    - name: Start Shadowsocks
+      run: |
+        sudo ssserver -c /etc/shadowsocks.json -d start
+        sleep 3
+
+    - name: Setup Ngrok
+      run: |
+        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar -xzf ngrok-v3-stable-linux-amd64.tgz
+        chmod +x ngrok
+        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        ./ngrok tcp 8388 > /dev/null 2>&1 &
+        sleep 5
+
+    - name: Get connection info
+      run: |
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels | grep -o 'tcp://[^"]*' | head -1)
+        SERVER_IP=$(echo "$TUNNEL_INFO" | cut -d':' -f2 | sed 's#//##')
+        SERVER_PORT=$(echo "$TUNNEL_INFO" | cut -d':' -f3)
+        echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
+        echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
+
+    - name: Display config
+      run: |
+        echo "Shadowsocks Configuration:"
+        echo "Server: ${{ env.SERVER_IP }}"
+        echo "Port: ${{ env.SERVER_PORT }}"
+        echo "Password: ${{ env.PASSWORD }}"
+        echo "Method: aes-256-cfb"
