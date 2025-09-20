@@ -1,0 +1,32 @@
+name: Outline Server
+
+on:
+  workflow_dispatch
+
+jobs:
+  deploy-outline:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install Docker
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y docker.io
+        sudo systemctl start docker
+        sudo systemctl enable docker
+
+    - name: Run Outline Server
+      run: |
+        sudo docker run -d --name outline \
+          -p 10086:10086 \
+          -v outline-data:/root/outline \
+          outline/server
+
+    - name: Get access info
+      run: |
+        sleep 10
+        sudo docker logs outline 2>&1 | grep "accessUrl" | head -1 | cut -d'"' -f4 > access.txt
+        echo "ACCESS_URL=$(cat access.txt)" >> $GITHUB_ENV
+
+    - name: Display access URL
+      run: |
+        echo "Outline Server Access URL: ${{ env.ACCESS_URL }}"
