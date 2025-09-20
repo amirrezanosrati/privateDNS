@@ -10,48 +10,42 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install OpenVPN and dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y openvpn easy-rsa
+        sudo apt-get install -y openvpn easy-rsa curl jq
 
-    - name: Configure OpenVPN
+    - name: Setup OpenVPN
       run: |
-        # ایجاد دایرکتوری پیکربندی
-        sudo rm -rf /etc/openvpn/easy-rsa
-        sudo make-cadir /etc/openvpn/easy-rsa
+        # ایجاد ساختار دایرکتوری
+        sudo mkdir -p /etc/openvpn/easy-rsa
         cd /etc/openvpn/easy-rsa
         
-        # تنظیم متغیرهای محیطی برای easy-rsa
-        sudo tee vars > /dev/null << EOF
-set_var EASYRSA_REQ_COUNTRY    "US"
-set_var EASYRSA_REQ_PROVINCE   "California"
-set_var EASYRSA_REQ_CITY       "San Francisco"
-set_var EASYRSA_REQ_ORG        "GitHub OpenVPN"
-set_var EASYRSA_REQ_EMAIL      "admin@github.com"
-set_var EASYRSA_REQ_OU         "IT Department"
-set_var EASYRSA_ALGO           "ec"
-set_var EASYRSA_DIGEST         "sha512"
-EOF
-        
         # مقداردهی اولیه PKI
-        ./easyrsa --batch init-pki
+        sudo /usr/share/easy-rsa/easyrsa init-pki
+        echo "初始化 PKI 完成"
         
-        # ساخت CA (با پاسخ‌های پیش‌فرض)
-        ./easyrsa --batch build-ca nopass
+        # ساخت CA
+        printf "CN\nOpenVPN-CA\n\n\n\n\nyes\n" | sudo /usr/share/easy-rsa/easyrsa build-ca nopass
+        echo "CA 创建完成"
         
         # تولید کلید سرور
-        ./easyrsa --batch gen-req server nopass
-        ./easyrsa --batch sign-req server server
+        printf "server\n" | sudo /usr/share/easy-rsa/easyrsa gen-req server nopass
+        echo "yes" | sudo /usr/share/easy-rsa/easyrsa sign-req server server
+        echo "服务器密钥创建完成"
         
-        # تولید پارامترهای Diffie-Hellman
-        ./easyrsa --batch gen-dh
+        # تولید Diffie-Hellman parameters
+        sudo /usr/share/easy-rsa/easyrsa gen-dh
+        echo "DH 参数生成完成"
         
-        # تولید کلید TLS
-        openvpn --genkey --secret pki/ta.key
-        
+        # تولید TLS key
+        sudo openvpn --genkey secret /etc/openvpn/easy-rsa/pki/ta.key
+        echo "TLS 密钥生成完成"
+
+    - name: Create server configuration
+      run: |
         # ایجاد پیکربندی سرور
-        sudo tee /etc/openvpn/server.conf > /dev/null << EOF
+        sudo tee /etc/openvpn/server.conf > /dev/null << 'EOF'
 port 1194
 proto udp
 dev tun
@@ -75,16 +69,16 @@ push "dhcp-option DNS 8.8.4.4"
 EOF
         
         # فعال کردن IP forwarding
+        echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
         sudo sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-        sudo sysctl -p
 
-    - name: Generate client configuration
+    - name: Generate client keys and config
       run: |
         cd /etc/openvpn/easy-rsa
         
         # تولید کلید کلاینت
-        ./easyrsa --batch gen-req client1 nopass
-        ./easyrsa --batch sign-req client client1
+        printf "client1\n" | sudo /usr/share/easy-rsa/easyrsa gen-req client1 nopass
+        echo "yes" | sudo /usr/share/easy-rsa/easyrsa sign-req client client1
         
         # ایجاد پیکربندی کلاینت
         sudo tee /tmp/client.ovpn > /dev/null << 'EOF'
@@ -102,27 +96,23 @@ verb 3
 key-direction 1
 
 <ca>
-CA_CERT_CONTENT
-</ca>
-
-<cert>
-CLIENT_CERT_CONTENT
-</cert>
-
-<key>
-CLIENT_KEY_CONTENT
-</key>
-
-<tls-auth>
-TA_KEY_CONTENT
-</tls-auth>
 EOF
         
-        # جایگزینی محتواهای واقعی
-        sudo sed -i "s/CA_CERT_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/ca.crt | tr -d '\n')/g" /tmp/client.ovpn
-        sudo sed -i "s/CLIENT_CERT_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/issued/client1.crt | tr -d '\n')/g" /tmp/client.ovpn
-        sudo sed -i "s/CLIENT_KEY_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/private/client1.key | tr -d '\n')/g" /tmp/client.ovpn
-        sudo sed -i "s/TA_KEY_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/ta.key | tr -d '\n')/g" /tmp/client.ovpn
+        # اضافه کردن محتوای گواهی CA
+        sudo cat /etc/openvpn/easy-rsa/pki/ca.crt >> /tmp/client.ovpn
+        echo "</ca>" >> /tmp/client.ovpn
+        
+        echo "<cert>" >> /tmp/client.ovpn
+        sudo cat /etc/openvpn/easy-rsa/pki/issued/client1.crt >> /tmp/client.ovpn
+        echo "</cert>" >> /tmp/client.ovpn
+        
+        echo "<key>" >> /tmp/client.ovpn
+        sudo cat /etc/openvpn/easy-rsa/pki/private/client1.key >> /tmp/client.ovpn
+        echo "</key>" >> /tmp/client.ovpn
+        
+        echo "<tls-auth>" >> /tmp/client.ovpn
+        sudo cat /etc/openvpn/easy-rsa/pki/ta.key >> /tmp/client.ovpn
+        echo "</tls-auth>" >> /tmp/client.ovpn
         
         # ذخیره پیکربندی کلاینت
         CLIENT_CONFIG=$(cat /tmp/client.ovpn)
@@ -132,50 +122,57 @@ EOF
 
     - name: Start OpenVPN service
       run: |
-        # راه اندازی سرویس OpenVPN
-        sudo systemctl start openvpn-server@server.service || true
-        
-        # اگر سرویس وجود ندارد، مستقیم اجرا کن
-        if ! sudo systemctl is-active --quiet openvpn-server@server.service; then
-          echo "Starting OpenVPN manually..."
-          sudo openvpn --daemon --config /etc/openvpn/server.conf
-          sleep 5
-        fi
+        # راه اندازی OpenVPN
+        sudo openvpn --daemon --config /etc/openvpn/server.conf --log /var/log/openvpn.log
         
         # بررسی وضعیت
+        sleep 5
         if pgrep openvpn; then
-          echo "OpenVPN is running"
-          echo "OPENVPN_PORT=1194" >> $GITHUB_ENV
+          echo "✅ OpenVPN is running successfully"
         else
-          echo "OpenVPN failed to start"
+          echo "❌ OpenVPN failed to start"
+          sudo cat /var/log/openvpn.log || echo "No log file found"
           exit 1
         fi
 
     - name: Setup Ngrok tunnel
       run: |
-        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
-        tar -xzf ngrok-v3-stable-linux-amd64.tgz
-        chmod +x ngrok
+        # دانلود و نصب Ngrok
+        curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /tmp/
+        chmod +x /tmp/ngrok
         
-        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-        ./ngrok udp 1194 --log=stdout > ngrok.log 2>&1 &
+        # تنظیم توکن
+        /tmp/ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        
+        # راه اندازی تونل
+        /tmp/ngrok udp 1194 --log stdout > /tmp/ngrok.log 2>&1 &
+        
+        # انتظار برای راه اندازی
         sleep 10
+        
+        # نمایش لاگ برای دیباگ
+        echo "Ngrok log:"
+        cat /tmp/ngrok.log || echo "No ngrok log found"
 
     - name: Get connection info
       run: |
-        # انتظار برای راه اندازی ngrok
-        sleep 10
-        
         # دریافت اطلاعات تونل
-        TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[] | select(.proto == "udp") | .public_url')
+        sleep 10
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "{}")
+        echo "Tunnel info: $TUNNEL_INFO"
         
-        if [ -n "$TUNNEL_URL" ]; then
-            SERVER_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
-            SERVER_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
+        # استخراج اطلاعات از JSON
+        SERVER_URL=$(echo "$TUNNEL_INFO" | jq -r '.tunnels[0].public_url // empty')
+        
+        if [ -n "$SERVER_URL" ]; then
+            SERVER_IP=$(echo "$SERVER_URL" | cut -d':' -f2 | sed 's#//##')
+            SERVER_PORT=$(echo "$SERVER_URL" | cut -d':' -f3)
+            echo "✅ Ngrok tunnel established: $SERVER_IP:$SERVER_PORT"
         else
-            echo "Failed to get ngrok tunnel info, using defaults"
+            # Fallback اگر Ngrok کار نکرد
             SERVER_IP="0.udp.ngrok.io"
             SERVER_PORT="1194"
+            echo "⚠️  Using fallback server address"
         fi
         
         echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
@@ -183,21 +180,22 @@ EOF
 
     - name: Display connection details
       run: |
-        # جایگزینی آدرس سرور در پیکربندی کلاینت
+        # ایجاد پیکربندی نهایی کلاینت
         FINAL_CONFIG=$(echo "$CLIENT_CONFIG" | sed "s/SERVER_IP/$SERVER_IP/g" | sed "s/SERVER_PORT/$SERVER_PORT/g")
         
         echo "=========================================="
-        echo "🚀 OpenVPN SERVER READY!"
+        echo "🚀 OpenVPN Server Ready!"
         echo "=========================================="
-        echo "Server: $SERVER_IP"
-        echo "Port: $SERVER_PORT"
-        echo "Protocol: UDP"
+        echo "📡 Server: $SERVER_IP"
+        echo "🚪 Port: $SERVER_PORT"
+        echo "📋 Protocol: UDP"
         echo ""
         echo "🔧 Client Configuration:"
         echo "Copy the content below to a file with .ovpn extension"
         echo "=========================================="
         echo "$FINAL_CONFIG"
         echo "=========================================="
+        echo "💡 Import this .ovpn file in your OpenVPN client"
         echo "⏰ This server will be active for 6 hours"
         echo "=========================================="
 
