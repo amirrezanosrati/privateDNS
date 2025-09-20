@@ -18,24 +18,37 @@ jobs:
     - name: Configure OpenVPN
       run: |
         # ایجاد دایرکتوری پیکربندی
+        sudo rm -rf /etc/openvpn/easy-rsa
         sudo make-cadir /etc/openvpn/easy-rsa
         cd /etc/openvpn/easy-rsa
         
+        # تنظیم متغیرهای محیطی برای easy-rsa
+        sudo tee vars > /dev/null << EOF
+set_var EASYRSA_REQ_COUNTRY    "US"
+set_var EASYRSA_REQ_PROVINCE   "California"
+set_var EASYRSA_REQ_CITY       "San Francisco"
+set_var EASYRSA_REQ_ORG        "GitHub OpenVPN"
+set_var EASYRSA_REQ_EMAIL      "admin@github.com"
+set_var EASYRSA_REQ_OU         "IT Department"
+set_var EASYRSA_ALGO           "ec"
+set_var EASYRSA_DIGEST         "sha512"
+EOF
+        
         # مقداردهی اولیه PKI
-        ./easyrsa init-pki
+        ./easyrsa --batch init-pki
         
         # ساخت CA (با پاسخ‌های پیش‌فرض)
-        printf '\n\n' | ./easyrsa build-ca nopass
+        ./easyrsa --batch build-ca nopass
         
         # تولید کلید سرور
-        ./easyrsa gen-req server nopass
-        printf 'yes\n' | ./easyrsa sign-req server server
+        ./easyrsa --batch gen-req server nopass
+        ./easyrsa --batch sign-req server server
         
         # تولید پارامترهای Diffie-Hellman
-        ./easyrsa gen-dh
+        ./easyrsa --batch gen-dh
         
         # تولید کلید TLS
-        openvpn --genkey secret pki/ta.key
+        openvpn --genkey --secret pki/ta.key
         
         # ایجاد پیکربندی سرور
         sudo tee /etc/openvpn/server.conf > /dev/null << EOF
@@ -64,26 +77,21 @@ EOF
         # فعال کردن IP forwarding
         sudo sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
         sudo sysctl -p
-        
-        # راه اندازی سرویس OpenVPN
-        sudo systemctl start openvpn@server
-        
-        echo "OPENVPN_PORT=1194" >> $GITHUB_ENV
 
     - name: Generate client configuration
       run: |
         cd /etc/openvpn/easy-rsa
         
         # تولید کلید کلاینت
-        ./easyrsa gen-req client1 nopass
-        printf 'yes\n' | ./easyrsa sign-req client client1
+        ./easyrsa --batch gen-req client1 nopass
+        ./easyrsa --batch sign-req client client1
         
         # ایجاد پیکربندی کلاینت
-        sudo tee /tmp/client1.ovpn > /dev/null << EOF
+        sudo tee /tmp/client.ovpn > /dev/null << 'EOF'
 client
 dev tun
 proto udp
-remote %SERVER_IP% %SERVER_PORT%
+remote SERVER_IP SERVER_PORT
 resolv-retry infinite
 nobind
 persist-key
@@ -94,27 +102,54 @@ verb 3
 key-direction 1
 
 <ca>
-$(cat /etc/openvpn/easy-rsa/pki/ca.crt)
+CA_CERT_CONTENT
 </ca>
 
 <cert>
-$(cat /etc/openvpn/easy-rsa/pki/issued/client1.crt)
+CLIENT_CERT_CONTENT
 </cert>
 
 <key>
-$(cat /etc/openvpn/easy-rsa/pki/private/client1.key)
+CLIENT_KEY_CONTENT
 </key>
 
 <tls-auth>
-$(cat /etc/openvpn/easy-rsa/pki/ta.key)
+TA_KEY_CONTENT
 </tls-auth>
 EOF
-
+        
+        # جایگزینی محتواهای واقعی
+        sudo sed -i "s/CA_CERT_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/ca.crt | tr -d '\n')/g" /tmp/client.ovpn
+        sudo sed -i "s/CLIENT_CERT_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/issued/client1.crt | tr -d '\n')/g" /tmp/client.ovpn
+        sudo sed -i "s/CLIENT_KEY_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/private/client1.key | tr -d '\n')/g" /tmp/client.ovpn
+        sudo sed -i "s/TA_KEY_CONTENT/$(sed -e 's/[\&/]/\\&/g' -e 's/$/\\n/' /etc/openvpn/easy-rsa/pki/ta.key | tr -d '\n')/g" /tmp/client.ovpn
+        
         # ذخیره پیکربندی کلاینت
-        CLIENT_CONFIG=$(cat /tmp/client1.ovpn)
+        CLIENT_CONFIG=$(cat /tmp/client.ovpn)
         echo "CLIENT_CONFIG<<EOF" >> $GITHUB_ENV
         echo "$CLIENT_CONFIG" >> $GITHUB_ENV
         echo "EOF" >> $GITHUB_ENV
+
+    - name: Start OpenVPN service
+      run: |
+        # راه اندازی سرویس OpenVPN
+        sudo systemctl start openvpn-server@server.service || true
+        
+        # اگر سرویس وجود ندارد، مستقیم اجرا کن
+        if ! sudo systemctl is-active --quiet openvpn-server@server.service; then
+          echo "Starting OpenVPN manually..."
+          sudo openvpn --daemon --config /etc/openvpn/server.conf
+          sleep 5
+        fi
+        
+        # بررسی وضعیت
+        if pgrep openvpn; then
+          echo "OpenVPN is running"
+          echo "OPENVPN_PORT=1194" >> $GITHUB_ENV
+        else
+          echo "OpenVPN failed to start"
+          exit 1
+        fi
 
     - name: Setup Ngrok tunnel
       run: |
@@ -132,11 +167,11 @@ EOF
         sleep 10
         
         # دریافت اطلاعات تونل
-        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels | grep -o 'udp://[^"]*' | head -1)
+        TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[] | select(.proto == "udp") | .public_url')
         
-        if [ -n "$TUNNEL_INFO" ]; then
-            SERVER_IP=$(echo "$TUNNEL_INFO" | cut -d':' -f2 | sed 's#//##')
-            SERVER_PORT=$(echo "$TUNNEL_INFO" | cut -d':' -f3)
+        if [ -n "$TUNNEL_URL" ]; then
+            SERVER_IP=$(echo "$TUNNEL_URL" | cut -d':' -f2 | sed 's#//##')
+            SERVER_PORT=$(echo "$TUNNEL_URL" | cut -d':' -f3)
         else
             echo "Failed to get ngrok tunnel info, using defaults"
             SERVER_IP="0.udp.ngrok.io"
@@ -149,7 +184,7 @@ EOF
     - name: Display connection details
       run: |
         # جایگزینی آدرس سرور در پیکربندی کلاینت
-        FINAL_CONFIG=$(echo "$CLIENT_CONFIG" | sed "s/%SERVER_IP%/$SERVER_IP/g" | sed "s/%SERVER_PORT%/$SERVER_PORT/g")
+        FINAL_CONFIG=$(echo "$CLIENT_CONFIG" | sed "s/SERVER_IP/$SERVER_IP/g" | sed "s/SERVER_PORT/$SERVER_PORT/g")
         
         echo "=========================================="
         echo "🚀 OpenVPN SERVER READY!"
