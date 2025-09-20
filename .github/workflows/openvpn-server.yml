@@ -1,206 +1,81 @@
-name: OpenVPN Server Creator
+name: SSH Server
 
 on:
   workflow_dispatch
 
 jobs:
-  deploy-openvpn:
+  deploy-ssh:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Install dependencies
+    - name: Install SSH
       run: |
         sudo apt-get update
-        sudo apt-get install -y openvpn easy-rsa curl jq
+        sudo apt-get install -y openssh-server
 
-    - name: Setup OpenVPN
+    - name: Configure SSH
       run: |
-        # ایجاد ساختار دایرکتوری
-        sudo mkdir -p /etc/openvpn/easy-rsa
-        cd /etc/openvpn/easy-rsa
+        # تنظیم SSH
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
         
-        # مقداردهی اولیه PKI
-        sudo /usr/share/easy-rsa/easyrsa init-pki
-        echo "初始化 PKI 完成"
+        # ایجاد رمز عبور
+        SSH_PASSWORD=$(openssl rand -base64 12)
+        echo "root:$SSH_PASSWORD" | sudo chpasswd
+        echo "SSH_PASSWORD=$SSH_PASSWORD" >> $GITHUB_ENV
         
-        # ساخت CA
-        printf "CN\nOpenVPN-CA\n\n\n\n\nyes\n" | sudo /usr/share/easy-rsa/easyrsa build-ca nopass
-        echo "CA 创建完成"
-        
-        # تولید کلید سرور
-        printf "server\n" | sudo /usr/share/easy-rsa/easyrsa gen-req server nopass
-        echo "yes" | sudo /usr/share/easy-rsa/easyrsa sign-req server server
-        echo "服务器密钥创建完成"
-        
-        # تولید Diffie-Hellman parameters
-        sudo /usr/share/easy-rsa/easyrsa gen-dh
-        echo "DH 参数生成完成"
-        
-        # تولید TLS key
-        sudo openvpn --genkey secret /etc/openvpn/easy-rsa/pki/ta.key
-        echo "TLS 密钥生成完成"
+        # راه‌اندازی سرویس
+        sudo service ssh restart
 
-    - name: Create server configuration
+    - name: Setup Ngrok
       run: |
-        # ایجاد پیکربندی سرور
-        sudo tee /etc/openvpn/server.conf > /dev/null << 'EOF'
-port 1194
-proto udp
-dev tun
-ca /etc/openvpn/easy-rsa/pki/ca.crt
-cert /etc/openvpn/easy-rsa/pki/issued/server.crt
-key /etc/openvpn/easy-rsa/pki/private/server.key
-dh /etc/openvpn/easy-rsa/pki/dh.pem
-server 10.8.0.0 255.255.255.0
-ifconfig-pool-persist /var/log/openvpn/ipp.txt
-keepalive 10 120
-tls-auth /etc/openvpn/easy-rsa/pki/ta.key 0
-cipher AES-256-CBC
-persist-key
-persist-tun
-status /var/log/openvpn/openvpn-status.log
-verb 3
-explicit-exit-notify 1
-push "redirect-gateway def1 bypass-dhcp"
-push "dhcp-option DNS 8.8.8.8"
-push "dhcp-option DNS 8.8.4.4"
-EOF
-        
-        # فعال کردن IP forwarding
-        echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-        sudo sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-
-    - name: Generate client keys and config
-      run: |
-        cd /etc/openvpn/easy-rsa
-        
-        # تولید کلید کلاینت
-        printf "client1\n" | sudo /usr/share/easy-rsa/easyrsa gen-req client1 nopass
-        echo "yes" | sudo /usr/share/easy-rsa/easyrsa sign-req client client1
-        
-        # ایجاد پیکربندی کلاینت
-        sudo tee /tmp/client.ovpn > /dev/null << 'EOF'
-client
-dev tun
-proto udp
-remote SERVER_IP SERVER_PORT
-resolv-retry infinite
-nobind
-persist-key
-persist-tun
-remote-cert-tls server
-cipher AES-256-CBC
-verb 3
-key-direction 1
-
-<ca>
-EOF
-        
-        # اضافه کردن محتوای گواهی CA
-        sudo cat /etc/openvpn/easy-rsa/pki/ca.crt >> /tmp/client.ovpn
-        echo "</ca>" >> /tmp/client.ovpn
-        
-        echo "<cert>" >> /tmp/client.ovpn
-        sudo cat /etc/openvpn/easy-rsa/pki/issued/client1.crt >> /tmp/client.ovpn
-        echo "</cert>" >> /tmp/client.ovpn
-        
-        echo "<key>" >> /tmp/client.ovpn
-        sudo cat /etc/openvpn/easy-rsa/pki/private/client1.key >> /tmp/client.ovpn
-        echo "</key>" >> /tmp/client.ovpn
-        
-        echo "<tls-auth>" >> /tmp/client.ovpn
-        sudo cat /etc/openvpn/easy-rsa/pki/ta.key >> /tmp/client.ovpn
-        echo "</tls-auth>" >> /tmp/client.ovpn
-        
-        # ذخیره پیکربندی کلاینت
-        CLIENT_CONFIG=$(cat /tmp/client.ovpn)
-        echo "CLIENT_CONFIG<<EOF" >> $GITHUB_ENV
-        echo "$CLIENT_CONFIG" >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
-
-    - name: Start OpenVPN service
-      run: |
-        # راه اندازی OpenVPN
-        sudo openvpn --daemon --config /etc/openvpn/server.conf --log /var/log/openvpn.log
-        
-        # بررسی وضعیت
-        sleep 5
-        if pgrep openvpn; then
-          echo "✅ OpenVPN is running successfully"
-        else
-          echo "❌ OpenVPN failed to start"
-          sudo cat /var/log/openvpn.log || echo "No log file found"
-          exit 1
-        fi
-
-    - name: Setup Ngrok tunnel
-      run: |
-        # دانلود و نصب Ngrok
-        curl -s https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /tmp/
-        chmod +x /tmp/ngrok
+        # دانلود Ngrok
+        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar -xzf ngrok-v3-stable-linux-amd64.tgz
+        chmod +x ngrok
         
         # تنظیم توکن
-        /tmp/ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+        ./ngrok authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
         
-        # راه اندازی تونل
-        /tmp/ngrok udp 1194 --log stdout > /tmp/ngrok.log 2>&1 &
-        
-        # انتظار برای راه اندازی
-        sleep 10
-        
-        # نمایش لاگ برای دیباگ
-        echo "Ngrok log:"
-        cat /tmp/ngrok.log || echo "No ngrok log found"
+        # راه‌اندازی تونل
+        ./ngrok tcp 22 > /dev/null 2>&1 &
+        sleep 5
 
     - name: Get connection info
       run: |
         # دریافت اطلاعات تونل
-        sleep 10
-        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "{}")
-        echo "Tunnel info: $TUNNEL_INFO"
+        sleep 5
+        TUNNEL_INFO=$(curl -s http://localhost:4040/api/tunnels || echo "No tunnel info")
         
-        # استخراج اطلاعات از JSON
-        SERVER_URL=$(echo "$TUNNEL_INFO" | jq -r '.tunnels[0].public_url // empty')
-        
-        if [ -n "$SERVER_URL" ]; then
-            SERVER_IP=$(echo "$SERVER_URL" | cut -d':' -f2 | sed 's#//##')
-            SERVER_PORT=$(echo "$SERVER_URL" | cut -d':' -f3)
-            echo "✅ Ngrok tunnel established: $SERVER_IP:$SERVER_PORT"
+        if echo "$TUNNEL_INFO" | grep -q "tcp://"; then
+          SERVER_URL=$(echo "$TUNNEL_INFO" | grep -o "tcp://[^ ]*" | head -1)
+          SERVER_IP=$(echo "$SERVER_URL" | cut -d':' -f2 | sed 's#//##')
+          SERVER_PORT=$(echo "$SERVER_URL" | cut -d':' -f3)
         else
-            # Fallback اگر Ngrok کار نکرد
-            SERVER_IP="0.udp.ngrok.io"
-            SERVER_PORT="1194"
-            echo "⚠️  Using fallback server address"
+          SERVER_IP="0.tcp.ngrok.io"
+          SERVER_PORT="1022"
         fi
         
         echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
         echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
 
-    - name: Display connection details
+    - name: Show connection details
       run: |
-        # ایجاد پیکربندی نهایی کلاینت
-        FINAL_CONFIG=$(echo "$CLIENT_CONFIG" | sed "s/SERVER_IP/$SERVER_IP/g" | sed "s/SERVER_PORT/$SERVER_PORT/g")
-        
         echo "=========================================="
-        echo "🚀 OpenVPN Server Ready!"
+        echo "🚀 SSH Server Ready!"
         echo "=========================================="
-        echo "📡 Server: $SERVER_IP"
-        echo "🚪 Port: $SERVER_PORT"
-        echo "📋 Protocol: UDP"
+        echo "📡 Server: ${{ env.SERVER_IP }}"
+        echo "🚪 Port: ${{ env.SERVER_PORT }}"
+        echo "👤 Username: root"
+        echo "🔑 Password: ${{ env.SSH_PASSWORD }}"
         echo ""
-        echo "🔧 Client Configuration:"
-        echo "Copy the content below to a file with .ovpn extension"
-        echo "=========================================="
-        echo "$FINAL_CONFIG"
-        echo "=========================================="
-        echo "💡 Import this .ovpn file in your OpenVPN client"
+        echo "🔗 Connection command:"
+        echo "ssh root@${{ env.SERVER_IP }} -p ${{ env.SERVER_PORT }}"
+        echo ""
         echo "⏰ This server will be active for 6 hours"
         echo "=========================================="
 
-    - name: Keep server alive
+    - name: Keep alive
       run: |
-        echo "🟢 OpenVPN server is running for 6 hours..."
-        # نگه داشتن سرور فعال به مدت 6 ساعت
+        echo "🟢 Server is running..."
+        # نگه‌داری سرور برای 6 ساعت
         sleep 21600
